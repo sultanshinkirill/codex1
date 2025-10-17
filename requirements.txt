@@ -1,2 +1,5 @@
-flask
-moviepy
+Flask==3.0.3
+gunicorn==21.2.0
+moviepy==1.0.3
+Pillow==10.2.0
+proglog==0.1.10

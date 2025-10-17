@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <h2 style="margin: 0 0 1.5rem; font-size: 1.8rem; letter-spacing: -0.015em;">Batch complete ✨</h2>
+  {% set total = results|length %}
+  <p class="muted" style="margin: 0 0 1.5rem;">
+    Rendered {{ total }} clip{% if total != 1 %}s{% endif %} using <strong>{{ style_label }}</strong>.
+  </p>
+
+  <div class="actions">
+    <a class="primary-button" href="{{ download_all }}">Download all as .zip</a>
+    <a class="secondary-button" href="{{ url_for('index') }}">Process another batch</a>
+  </div>
+
+  <div class="results" style="margin-top: 2rem;">
+    <div class="results-grid">
+      {% for item in results %}
+        <article class="result-card">
+          <div class="result-meta">
+            <h3>{{ item.original_name }}</h3>
+            <span>{{ item.style_label }}</span>
+            {% if item.ratio_labels %}
+              <div class="result-badges">
+                {% for ratio in item.ratio_labels %}
+                  <span class="aspect-chip">{{ ratio }}</span>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+          <ul class="result-downloads">
+            {% for output in item.outputs %}
+              <li>
+                <a class="secondary-button" href="{{ output.url }}" download>{{ output.label }}</a>
+              </li>
+            {% endfor %}
+          </ul>
+        </article>
+      {% endfor %}
+    </div>
+  </div>
+{% endblock %}

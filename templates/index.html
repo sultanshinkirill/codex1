@@ -1,8 +1,207 @@
-<!doctype html>
-<html>
-  <head><meta charset="utf-8"><title>Vibe Resizer</title></head>
-  <body>
-    <h1>Vibe Resizer</h1>
-    <p>Server is running. We’ll add the real UI next.</p>
-  </body>
-</html>
+{% extends "base.html" %}
+
+{% block head_extra %}
+  {# TODO: replace ca-pub-XXXX with the production AdSense client id #}
+  <script
+    async
+    src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={{ ADS_CLIENT or 'ca-pub-XXXX' }}"
+    crossorigin="anonymous">
+  </script>
+{% endblock %}
+
+{% block content %}
+  <form id="batch-form" action="{{ url_for('process_upload') }}" method="post" enctype="multipart/form-data">
+    <div class="field">
+      <label for="file-picker">Upload up to 10 clips</label>
+      <div class="file-input">
+        <input
+          type="file"
+          id="file-picker"
+          name="videos"
+          accept=".mp4,.mov,.m4v,.mkv"
+          multiple
+          class="hidden-input"
+        >
+        <div class="actions" style="margin: 0; gap: 0.6rem;">
+          <button id="file-button" class="secondary-button" type="button">Choose videos</button>
+          <span id="selection-summary" class="muted" style="font-size: 0.85rem;">No files selected yet.</span>
+        </div>
+        <small>Pick individual files. Only the first 10 compatible videos are processed.</small>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Output aspect ratios (choose up to three)</label>
+      <div class="aspect-options">
+        {% for key, config in aspects.items() %}
+          <label class="aspect-card">
+            <input type="checkbox" name="ratio" value="{{ key }}" {% if key in default_aspects %}checked{% endif %}>
+            <span class="aspect-visual aspect-{{ key }}"></span>
+            <div class="aspect-text">
+              <strong>{{ config.label }}</strong>
+              <span>{{ config.description }}</span>
+            </div>
+          </label>
+        {% endfor %}
+      </div>
+      <small>Pick at least one ratio (max three per batch).</small>
+    </div>
+
+    {% set style_cards = {
+      "blur": {
+        "card_class": "style-blur",
+        "title": "Blurred letterbox",
+        "description": "Fills empty space with a softened clone of the video.",
+        "badge": None
+      },
+      "fill": {
+        "card_class": "style-fill",
+        "title": "Fill & crop",
+        "description": "Crops the clip to fill the entire frame.",
+        "badge": "Best for action"
+      },
+      "black": {
+        "card_class": "style-black",
+        "title": "Letterbox (black)",
+        "description": "Centers the original clip with solid black bars.",
+        "badge": None
+      }
+    } %}
+
+    <div class="field">
+      <label>Choose your reframing style</label>
+      <div class="style-options">
+        {% for value, label in styles.items() %}
+          {% set meta = style_cards.get(value, style_cards["blur"]) %}
+          <label class="style-option">
+            <input type="radio" name="style" value="{{ value }}" {% if loop.first %}checked{% endif %}>
+            <div class="style-card {{ meta.card_class }}">
+              <div class="style-visual"></div>
+              <p class="style-title">{{ meta.title }}</p>
+              <p class="style-description">
+                {{ meta.description }}
+              </p>
+              {% if meta.badge %}
+                <span class="style-badge">{{ meta.badge }}</span>
+              {% endif %}
+            </div>
+          </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="field">
+      <label>File naming</label>
+      <div class="naming-section">
+        <div class="mode-toggle">
+          <button type="button" class="mode-button active" id="naming-mode-auto" aria-pressed="true">Auto</button>
+          <button type="button" class="mode-button" id="naming-mode-custom" aria-pressed="false">Custom</button>
+        </div>
+        <p class="auto-summary" id="naming-auto-summary">Next filename preview: —</p>
+        <input type="hidden" name="naming_mode" id="naming-mode-input" value="auto">
+        <div id="custom-config" class="custom-config hidden">
+          <div class="naming-row">
+            <div class="preset-column">
+              <strong>Choose a preset</strong>
+              <select id="naming-preset">
+                <option value="base_ratio">Base + Ratio (default)</option>
+                <option value="base_ratio_style">Base__Ratio__Style</option>
+                <option value="base_dash_ratio">Base - Ratio</option>
+                <option value="base_style">Base__Style</option>
+                <option value="custom">Custom pattern…</option>
+              </select>
+            </div>
+            <div class="custom-pattern hidden" id="custom-pattern-wrapper">
+              <label for="naming-custom-pattern">Custom pattern</label>
+              <input type="text" id="naming-custom-pattern" placeholder="{base_clean}_{ratio}.{ext}">
+              <small>Tokens: <code>{base_clean}</code> <code>{base}</code> <code>{ratio}</code> <code>{style}</code> <code>{w}</code> <code>{h}</code> <code>{date}</code> <code>{seq}</code> <code>{ext}</code></small>
+            </div>
+          </div>
+
+          <div class="options-grid">
+            <div class="option-group">
+              <strong>Quick options</strong>
+              <label><input type="checkbox" id="opt-auto-clean" checked> Auto-clean base (remove ratio/resolution tokens)</label>
+              <label><input type="checkbox" id="opt-keep-tokens"> Keep original ratio/resolution tokens</label>
+              <label><input type="checkbox" id="opt-add-sequence" checked> Add sequence (001, 002…)</label>
+              <label><input type="checkbox" id="opt-append-date" checked> Append date (YYYY-MM-DD)</label>
+            </div>
+            <div class="option-group">
+              <strong>Label style</strong>
+              <label><input type="radio" name="label-mode" value="short" checked> Short labels (1x1, 16x9, blur)</label>
+              <label><input type="radio" name="label-mode" value="friendly"> Friendly labels (Square, Landscape, Blurred background)</label>
+            </div>
+          </div>
+
+          <div class="option-group">
+            <strong>Per-file base rename (optional)</strong>
+            <div id="base-editor" class="base-editor empty">
+              <p>No files selected yet.</p>
+            </div>
+          </div>
+
+          <input type="hidden" name="base_overrides" id="base-overrides-input">
+
+          <p class="muted pattern-preview">Pattern preview: <code id="pattern-preview"></code></p>
+          <small class="muted">We automatically clean duplicate extensions and remove listed ratio/resolution tokens. Unsupported characters become "_". Names are capped at 120 characters. Collisions append <code>__001</code>, <code>__002</code>, …</small>
+        </div>
+      </div>
+    </div>
+
+    <p class="muted" style="margin: 0;">
+      Rendering uses MoviePy/FFmpeg locally and may take a minute per clip. Leave this tab in view to see progress.
+    </p>
+
+    <div class="actions">
+      <button id="submit-button" class="primary-button" type="submit">Render batch</button>
+      <button id="reset-button" class="secondary-button" type="button">Reset</button>
+    </div>
+  </form>
+
+  <section class="ad-unit" aria-label="Sponsored">
+    <ins
+      class="adsbygoogle"
+      style="display:block"
+      data-ad-client="{{ ADS_CLIENT or 'ca-pub-XXXX' }}"
+      data-ad-slot="{{ ADS_SLOT_BOTTOM or 'TODO' }}"
+      data-ad-format="auto"
+      data-full-width-responsive="true">
+    </ins>
+    <script>
+      (adsbygoogle = window.adsbygoogle || []).push({});
+    </script>
+  </section>
+
+  <div id="dynamic-flash" class="flash hidden" role="alert"></div>
+
+  <section id="progress-section" class="progress-shell hidden" aria-live="polite">
+    <div class="progress-header">
+      <span class="gear-icon" aria-hidden="true">⚙️</span>
+      <div class="progress-status">
+        <strong id="progress-title">Waiting to start</strong>
+        <span id="progress-subtitle" class="muted">No files queued yet.</span>
+      </div>
+      <span id="progress-percent" class="progress-percent">0%</span>
+    </div>
+    <progress id="progress-bar" max="100" value="0"></progress>
+  </section>
+
+  <section id="results-section" class="results hidden" aria-live="polite">
+    <div class="results-header">
+      <h2>Deliverables</h2>
+      <a id="download-all" class="secondary-button" href="#" aria-disabled="true">Download all as .zip</a>
+    </div>
+    <div id="results-list" class="results-grid"></div>
+  </section>
+
+    <script>
+    window.vibeConfig = {
+      aspects: {{ aspects | tojson }},
+      styles: {{ styles | tojson }},
+      styleShort: {{ style_short_labels | tojson }},
+      apiProcess: "{{ url_for('api_process') }}"
+    };
+  </script>
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+
+{% endblock %}
