@@ -1,0 +1,13 @@
+resizemyvideo.io {
+  redir https://www.resizemyvideo.io{uri} 301
+}
+
+www.resizemyvideo.io {
+  reverse_proxy autoframe-app:8080
+  encode gzip zstd
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    X-Content-Type-Options "nosniff"
+  }
+}
