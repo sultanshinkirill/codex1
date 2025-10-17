@@ -1,0 +1,27 @@
+version: "3.9"
+services:
+  app:
+    build: .
+    container_name: autoframe-app
+    command: gunicorn -b 0.0.0.0:8080 app:app
+    environment:
+      - VIBE_RESIZER_SECRET=${VIBE_RESIZER_SECRET}
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    container_name: autoframe-caddy
+    depends_on:
+      - app
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
