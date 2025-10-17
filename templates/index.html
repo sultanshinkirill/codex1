@@ -158,18 +158,24 @@
     </div>
   </form>
 
-  <section class="ad-unit" aria-label="Sponsored">
-    <ins
-      class="adsbygoogle"
-      style="display:block"
-      data-ad-client="{{ ADS_CLIENT or 'ca-pub-XXXX' }}"
-      data-ad-slot="{{ ADS_SLOT_BOTTOM or 'TODO' }}"
-      data-ad-format="auto"
-      data-full-width-responsive="true">
-    </ins>
-    <script>
-      (adsbygoogle = window.adsbygoogle || []).push({});
-    </script>
+  {% set inline_active = ADS_CLIENT and ADS_SLOT_INLINE %}
+  <section
+    class="ad-slot ad-slot--inline{% if inline_active %} is-active{% endif %}"
+    aria-label="Sponsored"
+    data-slot="inline">
+    {% if inline_active %}
+      <ins
+        class="adsbygoogle"
+        style="display:block"
+        data-ad-client="{{ ADS_CLIENT }}"
+        data-ad-slot="{{ ADS_SLOT_INLINE }}"
+        data-ad-format="auto"
+        data-full-width-responsive="true">
+      </ins>
+      <script>(adsbygoogle = window.adsbygoogle || []).push({});</script>
+    {% else %}
+      <span class="ad-slot__placeholder" aria-hidden="true">Inline ad slot reserved</span>
+    {% endif %}
   </section>
 
   <div id="dynamic-flash" class="flash hidden" role="alert"></div>
@@ -199,7 +205,14 @@
       aspects: {{ aspects | tojson }},
       styles: {{ styles | tojson }},
       styleShort: {{ style_short_labels | tojson }},
-      apiProcess: "{{ url_for('api_process') }}"
+      apiProcess: "{{ url_for('api_process') }}",
+      ads: {{ {
+        "client": ADS_CLIENT,
+        "slotTop": ADS_SLOT_TOP,
+        "slotBottom": ADS_SLOT_BOTTOM,
+        "slotHero": ADS_SLOT_HERO,
+        "rewardedSlot": ADS_REWARDED_SLOT
+      } | tojson }}
     };
   </script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>

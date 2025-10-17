@@ -181,6 +181,9 @@ def inject_ads():
         "ADS_CLIENT": os.environ.get("ADS_CLIENT"),
         "ADS_SLOT_TOP": os.environ.get("ADS_SLOT_TOP"),
         "ADS_SLOT_BOTTOM": os.environ.get("ADS_SLOT_BOTTOM"),
+        "ADS_SLOT_HERO": os.environ.get("ADS_SLOT_HERO"),
+        "ADS_SLOT_INLINE": os.environ.get("ADS_SLOT_INLINE"),
+        "ADS_REWARDED_SLOT": os.environ.get("ADS_REWARDED_SLOT"),
     }
 
 
@@ -775,7 +778,7 @@ def download_bundle(job_id: str):
     buffer.seek(0)
     summary = load_summary(job_id)
     date_stamp = summary.get("config", {}).get("date_stamp") or datetime.utcnow().strftime(DATE_FORMAT)
-    filename = f"Vibe_Resizer__{date_stamp}.zip"
+    filename = f"Free_AutoFrame__{date_stamp}.zip"
     return send_file(
         buffer,
         mimetype="application/zip",

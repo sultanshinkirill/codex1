@@ -3,12 +3,31 @@
   const aspectOptions = config.aspects || {};
   const styleLabels = config.styles || {};
   const styleShortLabels = config.styleShort || {};
+  const adConfig = config.ads || {};
+
+  if (typeof window.launchRewardedAd !== "function") {
+    window.launchRewardedAd = async (options = {}) => {
+      if (!adConfig.client || !adConfig.rewardedSlot) {
+        console.warn("[Free AutoFrame] Rewarded ad slot not configured; ignoring request.");
+        return { status: "unconfigured" };
+      }
+      const detail = {
+        slot: adConfig.rewardedSlot,
+        client: adConfig.client,
+        options,
+        timestamp: Date.now(),
+      };
+      window.dispatchEvent(new CustomEvent("rewarded-ad-request", { detail }));
+      return { status: "dispatched", detail };
+    };
+  }
 
   const apiProcessUrl = config.apiProcess || "/api/process";
 
   const form = document.getElementById("batch-form");
   const fileInput = document.getElementById("file-picker");
   const fileButton = document.getElementById("file-button");
+  const fileInputWrapper = document.querySelector(".file-input");
   const ratioInputs = Array.from(document.querySelectorAll('input[name="ratio"]'));
   const styleInputs = Array.from(form.querySelectorAll('input[name="style"]'));
   const styleOptions = Array.from(document.querySelectorAll('.style-option'));
@@ -612,13 +631,33 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       notices.push(`Skipped unsupported files: ${skipped.join(", ")}`);
     }
     if (picked.length > maxFiles) {
-      notices.push(`Selected ${picked.length} clips. Only the first ${maxFiles} will be processed.`);
+      notices.push(`Max ${maxFiles} videos can be selected at once. You picked ${picked.length}.`);
     }
     const usable = picked.slice(0, maxFiles);
     summarizeSelection(usable);
     rebuildBaseEditor(usable);
     updatePatternPreview();
     return { files: usable, notices };
+  }
+
+  function updateFileInputFiles(files) {
+    if (!fileInput || typeof DataTransfer === "undefined") return;
+    const dataTransfer = new DataTransfer();
+    files.forEach((file) => dataTransfer.items.add(file));
+    fileInput.files = dataTransfer.files;
+  }
+
+  function processSelectedFiles(rawFiles, { announce = true } = {}) {
+    const review = sanitizeFileList(rawFiles);
+    updateFileInputFiles(review.files);
+    if (announce) {
+      if (review.notices.length) {
+        showFlash(review.notices.join(" • "));
+      } else {
+        clearFlash();
+      }
+    }
+    return review;
   }
 
   function getSelectedRatiosSafe() {
@@ -729,12 +768,68 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
 
   fileInput.addEventListener("change", () => {
     const files = Array.from(fileInput.files || []);
-    summarizeSelection(files);
-    rebuildBaseEditor(files);
-    updatePatternPreview();
+    processSelectedFiles(files);
   });
 
   fileButton.addEventListener("click", () => fileInput.click());
+
+  if (fileInputWrapper) {
+    const preventDefaults = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    ["dragenter", "dragover"].forEach((eventName) => {
+      fileInputWrapper.addEventListener(eventName, (event) => {
+        preventDefaults(event);
+        if (fileInput && fileInput.disabled) {
+          return;
+        }
+        fileInputWrapper.classList.add("is-dragover");
+      });
+    });
+
+    ["dragleave", "dragend"].forEach((eventName) => {
+      fileInputWrapper.addEventListener(eventName, (event) => {
+        preventDefaults(event);
+        if (fileInput && fileInput.disabled) {
+          fileInputWrapper.classList.remove("is-dragover");
+          return;
+        }
+        if (eventName === "dragleave") {
+          const related = event.relatedTarget;
+          if (related && fileInputWrapper.contains(related)) {
+            return;
+          }
+        }
+        fileInputWrapper.classList.remove("is-dragover");
+      });
+    });
+
+    fileInputWrapper.addEventListener("drop", (event) => {
+      preventDefaults(event);
+      fileInputWrapper.classList.remove("is-dragover");
+      if (fileInput && fileInput.disabled) {
+        return;
+      }
+      const files = Array.from(event.dataTransfer?.files || []);
+      if (!files.length) {
+        return;
+      }
+      processSelectedFiles(files);
+    });
+
+    fileInputWrapper.addEventListener("click", (event) => {
+      if (fileInput && fileInput.disabled) {
+        return;
+      }
+      const isButton = event.target.closest("button");
+      if (isButton) {
+        return;
+      }
+      fileInput.click();
+    });
+  }
 
   presetSelect.addEventListener("change", () => {
     namingOptions.preset = presetSelect.value;
