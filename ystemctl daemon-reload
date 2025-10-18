@@ -1,0 +1,9 @@
+[0;1;31m×[0m autoframe-worker.service - Free AutoFrame RQ worker
+     Loaded: loaded (]8;;file://resizemyvideo/etc/systemd/system/autoframe-worker.service/etc/systemd/system/autoframe-worker.service]8;;; [0;1;32menabled[0m; preset: [0;1;32menabled[0m)
+     Active: [0;1;31mfailed[0m (Result: resources) since Sat 2025-10-18 13:00:32 UTC; 6min ago
+        CPU: 0
+
+Oct 18 13:00:32 resizemyvideo systemd[1]: autoframe-worker.service: Scheduled restart job, restart counter is at 5.
+Oct 18 13:00:32 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe-worker.service: Start request repeated too quickly.[0m
+Oct 18 13:00:32 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe-worker.service: Failed with result 'resources'.[0m
+Oct 18 13:00:32 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start autoframe-worker.service - Free AutoFrame RQ worker.[0m

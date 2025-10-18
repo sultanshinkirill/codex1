@@ -1,0 +1,140 @@
+[0;1;31m×[0m autoframe.service - Free AutoFrame Flask API
+     Loaded: loaded (]8;;file://resizemyvideo/etc/systemd/system/autoframe.service/etc/systemd/system/autoframe.service]8;;; [0;1;32menabled[0m; preset: [0;1;32menabled[0m)
+     Active: [0;1;31mfailed[0m (Result: resources) since Sat 2025-10-18 13:00:32 UTC; 22s ago
+        CPU: 0
+
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start autoframe.service - Free AutoFrame Flask API.[0m
+Oct 18 13:00:32 resizemyvideo systemd[1]: autoframe.service: Scheduled restart job, restart counter is at 5.
+Oct 18 13:00:32 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Start request repeated too quickly.[0m
+Oct 18 13:00:32 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed with result 'resources'.[0m
+Oct 18 13:00:32 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start autoframe.service - Free AutoFrame Flask API.[0m
+Oct 18 13:00:30 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mautoframe.service: Failed to load environment files: No such file or directory[0m
+Oct 18 13:00:30 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed to spawn 'start' task: No such file or directory[0m
+Oct 18 13:00:30 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed with result 'resources'.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: Unit failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe unit autoframe.service has entered the 'failed' state with result 'resources'.[0m
+Oct 18 13:00:30 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start autoframe.service - Free AutoFrame Flask API.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: A start job for unit autoframe.service has failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mA start job for unit autoframe.service has finished with a failure.[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe job identifier is 25957 and the job result is failed.[0m
+Oct 18 13:00:30 resizemyvideo systemd[1]: autoframe.service: Scheduled restart job, restart counter is at 1.
+[0;38;5;245m░░ [0m[0;32mSubject: Automatic restarting of a unit has been scheduled[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mAutomatic restarting of the unit autoframe.service has been scheduled, as the result for[0m
+[0;38;5;245m░░[0m [0;32mthe configured Restart= setting for the unit.[0m
+Oct 18 13:00:30 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mautoframe.service: Failed to load environment files: No such file or directory[0m
+Oct 18 13:00:30 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed to spawn 'start' task: No such file or directory[0m
+Oct 18 13:00:30 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed with result 'resources'.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: Unit failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe unit autoframe.service has entered the 'failed' state with result 'resources'.[0m
+Oct 18 13:00:30 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start autoframe.service - Free AutoFrame Flask API.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: A start job for unit autoframe.service has failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mA start job for unit autoframe.service has finished with a failure.[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe job identifier is 26185 and the job result is failed.[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: autoframe.service: Scheduled restart job, restart counter is at 2.
+[0;38;5;245m░░ [0m[0;32mSubject: Automatic restarting of a unit has been scheduled[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mAutomatic restarting of the unit autoframe.service has been scheduled, as the result for[0m
+[0;38;5;245m░░[0m [0;32mthe configured Restart= setting for the unit.[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mautoframe.service: Failed to load environment files: No such file or directory[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed to spawn 'start' task: No such file or directory[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed with result 'resources'.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: Unit failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe unit autoframe.service has entered the 'failed' state with result 'resources'.[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start autoframe.service - Free AutoFrame Flask API.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: A start job for unit autoframe.service has failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mA start job for unit autoframe.service has finished with a failure.[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe job identifier is 26413 and the job result is failed.[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: autoframe.service: Scheduled restart job, restart counter is at 3.
+[0;38;5;245m░░ [0m[0;32mSubject: Automatic restarting of a unit has been scheduled[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mAutomatic restarting of the unit autoframe.service has been scheduled, as the result for[0m
+[0;38;5;245m░░[0m [0;32mthe configured Restart= setting for the unit.[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mautoframe.service: Failed to load environment files: No such file or directory[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed to spawn 'start' task: No such file or directory[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed with result 'resources'.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: Unit failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe unit autoframe.service has entered the 'failed' state with result 'resources'.[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start autoframe.service - Free AutoFrame Flask API.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: A start job for unit autoframe.service has failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mA start job for unit autoframe.service has finished with a failure.[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe job identifier is 26641 and the job result is failed.[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: autoframe.service: Scheduled restart job, restart counter is at 4.
+[0;38;5;245m░░ [0m[0;32mSubject: Automatic restarting of a unit has been scheduled[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mAutomatic restarting of the unit autoframe.service has been scheduled, as the result for[0m
+[0;38;5;245m░░[0m [0;32mthe configured Restart= setting for the unit.[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mautoframe.service: Failed to load environment files: No such file or directory[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed to spawn 'start' task: No such file or directory[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed with result 'resources'.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: Unit failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe unit autoframe.service has entered the 'failed' state with result 'resources'.[0m
+Oct 18 13:00:31 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start autoframe.service - Free AutoFrame Flask API.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: A start job for unit autoframe.service has failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mA start job for unit autoframe.service has finished with a failure.[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe job identifier is 26869 and the job result is failed.[0m
+Oct 18 13:00:32 resizemyvideo systemd[1]: autoframe.service: Scheduled restart job, restart counter is at 5.
+[0;38;5;245m░░ [0m[0;32mSubject: Automatic restarting of a unit has been scheduled[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mAutomatic restarting of the unit autoframe.service has been scheduled, as the result for[0m
+[0;38;5;245m░░[0m [0;32mthe configured Restart= setting for the unit.[0m
+Oct 18 13:00:32 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Start request repeated too quickly.[0m
+Oct 18 13:00:32 resizemyvideo systemd[1]: [0;1;38;5;185m[0;1;39m[0;1;38;5;185mautoframe.service: Failed with result 'resources'.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: Unit failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe unit autoframe.service has entered the 'failed' state with result 'resources'.[0m
+Oct 18 13:00:32 resizemyvideo systemd[1]: [0;1;31m[0;1;39m[0;1;31mFailed to start autoframe.service - Free AutoFrame Flask API.[0m
+[0;38;5;245m░░ [0m[0;32mSubject: A start job for unit autoframe.service has failed[0m
+[0;38;5;245m░░[0m [0;32mDefined-By: systemd[0m
+[0;38;5;245m░░[0m [0;32mSupport: http://www.ubuntu.com/support[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mA start job for unit autoframe.service has finished with a failure.[0m
+[0;38;5;245m░░[0m [0;32m[0m
+[0;38;5;245m░░[0m [0;32mThe job identifier is 27097 and the job result is failed.[0m

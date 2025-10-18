@@ -673,16 +673,24 @@ def build_blurred_letterbox(clip: VideoFileClip, target_size: tuple[int, int]):
 
 def build_black_letterbox(clip: VideoFileClip, target_size: tuple[int, int]):
     target_w, target_h = target_size
-    fit_scale = min(target_w / clip.w, target_h / clip.h)
-    letterboxed = resize_by_factor(clip, fit_scale).set_position(("center", "center"))
 
-    background = ColorClip(size=(target_w, target_h), color=(0, 0, 0))
-    background = background.set_duration(clip.duration)
+    # Resize to fit within the target frame
+    if clip.w / clip.h > target_w / target_h:
+        resized = clip.resize(width=target_w)
+    else:
+        resized = clip.resize(height=target_h)
 
-    composite = CompositeVideoClip([background, letterboxed], size=(target_w, target_h))
+    # Pad with a black canvas and center the clip
+    letterboxed = resized.on_color(
+        size=(target_w, target_h),
+        color=(0, 0, 0),
+        pos=("center", "center"),
+    )
+
     if clip.audio:
-        composite = composite.set_audio(clip.audio)
-    return composite.set_duration(clip.duration)
+        letterboxed = letterboxed.set_audio(clip.audio)
+
+    return letterboxed.set_duration(clip.duration)
 
 
 def build_fill_and_crop(clip: VideoFileClip, target_size: tuple[int, int]):
