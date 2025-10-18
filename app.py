@@ -629,7 +629,11 @@ def append_summary(job_id: str, entry: dict, config: Optional[dict] = None) -> N
 
 
 def resize_by_factor(clip: VideoFileClip, factor: float):
-    return clip.resize(factor)
+    if factor == 1.0:
+        return clip
+    new_w = max(1, int(round(clip.w * factor)))
+    new_h = max(1, int(round(clip.h * factor)))
+    return clip.resize((new_w, new_h))
 
 
 def crop_center(clip, width: int, height: int):
@@ -654,7 +658,7 @@ def build_blurred_letterbox(clip: VideoFileClip, target_size: tuple[int, int]):
     target_w, target_h = target_size
     # Keep the original framing centered within the target size.
     fit_scale = min(target_w / clip.w, target_h / clip.h)
-    letterboxed = resize_by_factor(clip, fit_scale).set_position(("center", "center"))
+    letterboxed = resize_by_factor(clip, fit_scale).set_position("center")
 
     # Create a blurred background that fills the target canvas.
     fill_scale = max(target_w / clip.w, target_h / clip.h)
@@ -675,7 +679,7 @@ def build_black_letterbox(clip: VideoFileClip, target_size: tuple[int, int]):
     target_w, target_h = target_size
 
     fit_scale = min(target_w / clip.w, target_h / clip.h)
-    letterboxed = resize_by_factor(clip, fit_scale).set_position(("center", "center"))
+    letterboxed = resize_by_factor(clip, fit_scale).set_position("center")
 
     background = ColorClip(size=(target_w, target_h), color=(0, 0, 0))
     background = background.set_duration(clip.duration)
