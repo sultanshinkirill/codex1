@@ -640,6 +640,17 @@ def crop_center(clip, width: int, height: int):
         y_center=clip.h / 2,
     )
 
+
+def normalize_orientation(clip: VideoFileClip):
+    rotation = int(getattr(clip, "rotation", 0) or 0) % 360
+    if rotation in (90, 270):
+        clip = clip.rotate(rotation)
+        clip.rotation = 0
+    elif rotation in (180,):
+        clip = clip.rotate(rotation)
+        clip.rotation = 0
+    return clip
+
 def apply_gaussian_blur(clip, radius: float):
     def blur_frame(frame):
         return np.array(Image.fromarray(frame).filter(ImageFilter.GaussianBlur(radius)))
@@ -1363,6 +1374,7 @@ def render_variants(
     outputs: list[dict] = []
 
     with VideoFileClip(str(input_path)) as clip:
+        clip = normalize_orientation(clip)
         fps = getattr(clip, "fps", None) or getattr(clip.reader, "fps", 30)
 
         builder = build_fill_and_crop if style == "fill" else build_blurred_letterbox
