@@ -1077,7 +1077,7 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       error.code = "S3_DISABLED";
       throw error;
     }
-    const data = await res.json();
+    const data = await parseJsonResponse(res);
     if (!res.ok || data.error) {
       throw new Error(data.error || `Upload slot failed (HTTP ${res.status})`);
     }
@@ -1110,7 +1110,7 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       method: "POST",
       body: formData,
     });
-    const data = await res.json();
+    const data = await parseJsonResponse(res);
     if (!res.ok || data.error) {
       throw new Error(data.error || `Local upload failed (HTTP ${res.status})`);
     }
@@ -1123,7 +1123,7 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    const data = await res.json();
+    const data = await parseJsonResponse(res);
     if (!res.ok || data.error) {
       throw new Error(data.error || `Job creation failed (HTTP ${res.status})`);
     }
@@ -1138,7 +1138,7 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
         reward_token: rewardToken || "",
       }),
     });
-    const data = await res.json();
+    const data = await parseJsonResponse(res);
     if (!res.ok || data.error) {
       throw new Error(data.error || `Failed to start job (HTTP ${res.status})`);
     }
@@ -1152,7 +1152,7 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/status`, {
         cache: "no-store",
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok || data.error) {
         throw new Error(data.error || `Failed to check job status (HTTP ${res.status})`);
       }
@@ -1210,6 +1210,17 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       label_mode: namingOptions.labelMode,
       date_stamp: dateStamp,
     };
+  }
+
+  async function parseJsonResponse(res) {
+    const contentType = res.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      return res.json();
+    }
+    const text = await res.text();
+    const error = new Error(text || `Unexpected response (HTTP ${res.status})`);
+    error.code = "NON_JSON";
+    throw error;
   }
 
   function formatEta(seconds) {
