@@ -642,13 +642,19 @@ def crop_center(clip, width: int, height: int):
 
 
 def normalize_orientation(clip: VideoFileClip):
-    rotation = int(getattr(clip, "rotation", 0) or 0) % 360
-    if rotation in (90, 270):
-        clip = clip.rotate(rotation)
+    reader_rotation = getattr(getattr(clip, "reader", None), "rotation", None)
+    raw_rotation = getattr(clip, "rotation", None)
+    rotation = raw_rotation if raw_rotation not in (None, 0) else reader_rotation
+    try:
+        angle = int(rotation or 0) % 360
+    except (TypeError, ValueError):
+        angle = 0
+
+    if angle in (90, 180, 270):
+        clip = clip.rotate(angle)
         clip.rotation = 0
-    elif rotation in (180,):
-        clip = clip.rotate(rotation)
-        clip.rotation = 0
+        if getattr(clip, "reader", None) and hasattr(clip.reader, "rotation"):
+            clip.reader.rotation = 0
     return clip
 
 def apply_gaussian_blur(clip, radius: float):
