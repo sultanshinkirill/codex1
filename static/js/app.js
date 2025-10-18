@@ -32,6 +32,7 @@
   const styleInputs = Array.from(form.querySelectorAll('input[name="style"]'));
   const styleOptions = Array.from(document.querySelectorAll('.style-option'));
   const selectionSummary = document.getElementById("selection-summary");
+  const asyncButton = document.getElementById("async-button");
   const submitButton = document.getElementById("submit-button");
   const resetButton = document.getElementById("reset-button");
   const flashBox = document.getElementById("dynamic-flash");
@@ -725,6 +726,9 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
   }
 
   function toggleForm(disabled) {
+    if (asyncButton) {
+      asyncButton.disabled = disabled;
+    }
     submitButton.disabled = disabled;
     resetButton.disabled = disabled;
     fileInput.disabled = disabled;
@@ -915,6 +919,302 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
     formData.append("naming_label_mode", namingOptions.labelMode);
     const overrideValue = namingOptions.mode === "custom" ? (baseOverrides[fileName] || "") : "";
     formData.append("base_override", overrideValue);
+  }
+
+  if (asyncButton) {
+    asyncButton.addEventListener("click", async (event) => {
+      event.preventDefault();
+      if (formDisabled) {
+        return;
+      }
+      await handleAsyncBatch();
+    });
+  }
+
+  async function handleAsyncBatch() {
+    clearFlash();
+    clearResults();
+    resetProgress();
+
+    const review = sanitizeFileList(Array.from(fileInput.files || []));
+    const files = review.files;
+    const warnings = [...(review.notices || [])];
+    const selectedRatios = getSelectedRatiosSafe();
+
+    if (!files.length) {
+      const message = warnings.length
+        ? warnings.join(" • ")
+        : "Select at least one compatible video.";
+      showFlash(message);
+      return;
+    }
+
+    if (!selectedRatios.length) {
+      showFlash("Choose at least one output aspect ratio.");
+      return;
+    }
+
+    toggleForm(true);
+    updateOverridesInput();
+
+    try {
+      initializeProgress(files.length);
+      const namingPayload = buildNamingPayload();
+
+      let jobId = (typeof crypto !== "undefined" && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : `job_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+      const uploadedRecords = [];
+
+      for (const [index, file] of files.entries()) {
+        updateProgressStatus(
+          Math.min(25, ((index) / Math.max(files.length, 1)) * 20 + 5),
+          `Uploading ${file.name}`,
+          `${index + 1} of ${files.length} clip(s) queued`
+        );
+
+        const uploadResult = await uploadAsyncFile(file, jobId);
+        if (uploadResult.job_id) {
+          jobId = uploadResult.job_id;
+        }
+        uploadedRecords.push(uploadResult.record);
+
+        updateProgressStatus(
+          Math.min(45, ((index + 1) / Math.max(files.length, 1)) * 30 + 10),
+          `Uploaded ${file.name}`,
+          `${index + 1} of ${files.length} clip(s) uploaded`
+        );
+      }
+
+      const job = await createAsyncJob({
+        job_id: jobId,
+        files: uploadedRecords,
+        ratios: selectedRatios,
+        style: styleSelector(),
+        naming: namingPayload,
+      });
+      jobId = job.id;
+
+      updateProgressStatus(
+        Math.max(targetProgress, 55),
+        "Awaiting rewarded ad",
+        "Complete the ad to begin rendering."
+      );
+
+      const adResult = await launchRewardedAd({ jobId });
+      const rewardToken = adResult?.detail?.token || null;
+
+      await startAsyncJob(jobId, rewardToken);
+      updateProgressStatus(
+        Math.max(targetProgress, 60),
+        "Rendering…",
+        "0% complete"
+      );
+
+      const finalJob = await pollAsyncJob(jobId, files.length);
+      renderAsyncResults(finalJob);
+
+      const messages = [];
+      if (warnings.length) {
+        messages.push(`Warnings: ${warnings.join(" • ")}`);
+      }
+      showFlash(["Batch completed successfully.", ...messages].join(" • "), "success");
+    } catch (error) {
+      console.error(error);
+      showFlash(error.message || "Unable to render batch asynchronously.");
+      resetProgress();
+    } finally {
+      toggleForm(false);
+    }
+  }
+
+  async function uploadAsyncFile(file, jobId) {
+    try {
+      const presign = await requestPresignedUpload(file, jobId);
+      await uploadToPresignedUrl(file, presign.upload);
+      return {
+        job_id: presign.job_id || jobId,
+        record: buildFileRecord(file, presign.file.key),
+      };
+    } catch (error) {
+      if (error && error.code === "S3_DISABLED") {
+        const local = await uploadLocalFile(file, jobId);
+        return {
+          job_id: local.job_id,
+          record: buildFileRecord(file, local.file.key),
+        };
+      }
+      throw error;
+    }
+  }
+
+  function buildFileRecord(file, key) {
+    const baseOverride = namingOptions.mode === "custom" ? (baseOverrides[file.name] || "") : "";
+    return {
+      key,
+      original_name: file.name,
+      size: file.size || 0,
+      content_type: file.type || "video/mp4",
+      base_override: baseOverride || null,
+    };
+  }
+
+  async function requestPresignedUpload(file, jobId) {
+    const res = await fetch("/api/upload-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: jobId,
+        filename: file.name,
+        size: file.size || 0,
+        content_type: file.type || "video/mp4",
+      }),
+    });
+    if (res.status === 503) {
+      const error = new Error("Object storage not configured.");
+      error.code = "S3_DISABLED";
+      throw error;
+    }
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.error || `Upload slot failed (HTTP ${res.status})`);
+    }
+    return data;
+  }
+
+  async function uploadToPresignedUrl(file, presign) {
+    if (!presign || !presign.url) {
+      throw new Error("Invalid presigned payload.");
+    }
+    const formData = new FormData();
+    Object.entries(presign.fields || {}).forEach(([key, value]) => {
+      formData.append(key, value);
+    });
+    formData.append("file", file);
+    const response = await fetch(presign.url, {
+      method: "POST",
+      body: formData,
+    });
+    if (!response.ok) {
+      throw new Error(`Upload failed for ${file.name} (HTTP ${response.status})`);
+    }
+  }
+
+  async function uploadLocalFile(file, jobId) {
+    const formData = new FormData();
+    formData.append("video", file);
+    formData.append("job_id", jobId);
+    const res = await fetch("/api/local-upload", {
+      method: "POST",
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.error || `Local upload failed (HTTP ${res.status})`);
+    }
+    return data;
+  }
+
+  async function createAsyncJob(payload) {
+    const res = await fetch("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.error || `Job creation failed (HTTP ${res.status})`);
+    }
+    return data.job;
+  }
+
+  async function startAsyncJob(jobId, rewardToken) {
+    const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        reward_token: rewardToken || "",
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.error || `Failed to start job (HTTP ${res.status})`);
+    }
+    return data.job;
+  }
+
+  async function pollAsyncJob(jobId, totalFiles) {
+    while (true) {
+      const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/status`, {
+        cache: "no-store",
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        throw new Error(data.error || `Failed to check job status (HTTP ${res.status})`);
+      }
+      const job = data.job;
+      const percent = Math.round(Math.max(0, Math.min(1, job.progress || 0)) * 100);
+      const statusText = job.status === "done" ? "Finalising…" : job.status === "failed" ? "Failed" : "Rendering…";
+      updateProgressStatus(
+        Math.max(targetProgress, percent || 0),
+        statusText,
+        `${percent}% complete`
+      );
+
+      if (job.status === "done") {
+        updateProgressStatus(100, "Batch complete", `${totalFiles} clip(s) rendered`);
+        return job;
+      }
+      if (job.status === "failed") {
+        throw new Error(job.message || "Rendering failed.");
+      }
+      await sleep(3000);
+    }
+  }
+
+  function buildNamingPayload() {
+    const pattern = getPatternString();
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    return {
+      mode: namingOptions.mode === "custom" ? "custom" : "auto",
+      pattern_choice: namingOptions.preset,
+      pattern,
+      custom_pattern: namingOptions.customPattern || "",
+      auto_clean: !!namingOptions.autoClean,
+      keep_tokens: !!namingOptions.keepTokens,
+      add_sequence: !!namingOptions.addSequence,
+      append_date: !!namingOptions.appendDate,
+      label_mode: namingOptions.labelMode,
+      date_stamp: dateStamp,
+    };
+  }
+
+  function renderAsyncResults(job) {
+    clearResults();
+    const styleKey = job.style || styleSelector();
+    (job.results || []).forEach((entry) => {
+      const normalized = {
+        original_name: entry.original_name,
+        style_label: styleLabels[styleKey] || styleKey,
+        ratio_labels: Array.from(new Set((entry.outputs || []).map((out) => out.ratio_label).filter(Boolean))),
+        outputs: (entry.outputs || []).map((out) => ({
+          url: out.url,
+          label: out.label || out.filename,
+          filename: out.filename,
+        })),
+      };
+      appendResultCard(normalized);
+    });
+
+    if (job.results && job.results.length) {
+      resultsSection.classList.remove("hidden");
+      downloadAllLink.href = `/download/${encodeURIComponent(job.id)}/bundle`;
+      downloadAllLink.setAttribute("aria-disabled", "false");
+    } else {
+      downloadAllLink.href = "#";
+      downloadAllLink.setAttribute("aria-disabled", "true");
+    }
   }
 
   form.addEventListener("submit", async (event) => {

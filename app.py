@@ -966,6 +966,33 @@ def api_upload_url():
     }, 201
 
 
+@app.post("/api/local-upload")
+def api_local_upload():
+    file_storage = request.files.get("video")
+    if not file_storage or file_storage.filename == "":
+        return {"error": "No video supplied."}, 400
+
+    if not allowed_file(file_storage.filename):
+        return {"error": "Unsupported format."}, 400
+
+    job_id = request.form.get("job_id") or uuid.uuid4().hex
+    safe_name = secure_filename(file_storage.filename)
+    target_dir = app.config["UPLOAD_FOLDER"] / job_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / safe_name
+    file_storage.save(target_path)
+
+    return {
+        "job_id": job_id,
+        "file": {
+            "key": f"{job_id}/{safe_name}",
+            "original_name": file_storage.filename,
+            "size": target_path.stat().st_size,
+            "content_type": file_storage.mimetype or "video/mp4",
+        },
+    }, 201
+
+
 @app.post("/api/jobs")
 def api_create_job():
     data = request.get_json(silent=True) or {}
