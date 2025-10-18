@@ -10,13 +10,17 @@ import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import uuid
 import zipfile
-from typing import Optional
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Optional
 
 import numpy as np
+import boto3
+import redis
 from flask import (
     Flask,
     abort,
@@ -32,14 +36,39 @@ from PIL import Image, ImageFilter
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 
+from rq import Queue
 from proglog import ProgressBarLogger
 
-from moviepy.editor import CompositeVideoClip, VideoFileClip, vfx
-import moviepy.video.fx.all as vfx
-from moviepy.editor import vfx
-from moviepy.video.fx.all import crop
-from moviepy.video.fx.all import resize
+from moviepy.editor import CompositeVideoClip, VideoFileClip
 from moviepy.video.VideoClip import ColorClip
+
+if not hasattr(Image, "ANTIALIAS"):
+    resample_filter = None
+    try:
+        resample_filter = Image.Resampling.LANCZOS  # Pillow >= 9.1
+    except AttributeError:
+        pass
+    if resample_filter is None:
+        resample_filter = getattr(Image, "LANCZOS", None)
+    if resample_filter is None:
+        resample_filter = getattr(Image, "BICUBIC", None)
+    if resample_filter is not None:
+        Image.ANTIALIAS = resample_filter
+        if hasattr(Image, "Resampling") and not hasattr(Image.Resampling, "ANTIALIAS"):
+            setattr(Image.Resampling, "ANTIALIAS", resample_filter)
+
+S3_BUCKET = os.environ.get("S3_BUCKET") or os.environ.get("AWS_S3_BUCKET")
+S3_REGION = os.environ.get("AWS_REGION")
+S3_UPLOAD_PREFIX = os.environ.get("S3_UPLOAD_PREFIX", "uploads")
+S3_OUTPUT_PREFIX = os.environ.get("S3_OUTPUT_PREFIX", "outputs")
+UPLOAD_URL_TTL = int(os.environ.get("UPLOAD_URL_TTL", "900"))
+DOWNLOAD_URL_TTL = int(os.environ.get("DOWNLOAD_URL_TTL", "86400"))
+MAX_FILES_PER_BATCH = int(os.environ.get("MAX_FILES_PER_BATCH", "10"))
+MAX_UPLOAD_SIZE_BYTES = int(os.environ.get("MAX_UPLOAD_SIZE_BYTES", str(120 * 1024 * 1024)))
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+JOB_QUEUE_NAME = os.environ.get("JOB_QUEUE_NAME", "autoframe-jobs")
+JOB_TIMEOUT = int(os.environ.get("JOB_TIMEOUT_SECONDS", str(60 * 60)))
+JOB_RESULT_TTL = int(os.environ.get("JOB_RESULT_TTL_SECONDS", str(7 * 24 * 60 * 60)))
 
 ALLOWED_EXTENSIONS = {"mp4", "mov", "m4v", "mkv"}
 STYLE_LABELS = {
@@ -93,6 +122,12 @@ DEFAULT_PATTERN_KEY = "base_ratio"
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv"}
 DATE_FORMAT = "%Y-%m-%d"
 JOB_PROGRESS: dict[str, dict] = {}
+
+JOB_STATUS_PENDING = "pending"
+JOB_STATUS_QUEUED = "queued"
+JOB_STATUS_PROCESSING = "processing"
+JOB_STATUS_COMPLETED = "completed"
+JOB_STATUS_FAILED = "failed"
 
 
 def update_job_progress(job_id: str, value: float, status: str = "processing") -> None:
@@ -173,6 +208,17 @@ class SafeFormatDict(dict):
 
 app = Flask(__name__)
 app.config.setdefault("MAX_CONTENT_LENGTH", 200 * 1024 * 1024)  # 200 MB
+app.config.setdefault("MAX_UPLOAD_FILES", MAX_FILES_PER_BATCH)
+app.config.setdefault("MAX_UPLOAD_SIZE_BYTES", MAX_UPLOAD_SIZE_BYTES)
+app.config.setdefault("S3_BUCKET", S3_BUCKET)
+app.config.setdefault("S3_UPLOAD_PREFIX", S3_UPLOAD_PREFIX)
+app.config.setdefault("S3_OUTPUT_PREFIX", S3_OUTPUT_PREFIX)
+app.config.setdefault("UPLOAD_URL_TTL", UPLOAD_URL_TTL)
+app.config.setdefault("DOWNLOAD_URL_TTL", DOWNLOAD_URL_TTL)
+app.config.setdefault("REDIS_URL", REDIS_URL)
+app.config.setdefault("JOB_QUEUE_NAME", JOB_QUEUE_NAME)
+app.config.setdefault("JOB_TIMEOUT", JOB_TIMEOUT)
+app.config.setdefault("JOB_RESULT_TTL", JOB_RESULT_TTL)
 
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", "uploads"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "outputs"))
@@ -196,6 +242,37 @@ def inject_ads():
     }
 
 
+def redis_connection() -> redis.Redis:
+    if not hasattr(app, "_redis_conn"):
+        app._redis_conn = redis.from_url(app.config["REDIS_URL"])
+    return app._redis_conn  # type: ignore[arg-type]
+
+
+def job_queue() -> Queue:
+    if not hasattr(app, "_job_queue"):
+        app._job_queue = Queue(
+            app.config["JOB_QUEUE_NAME"],
+            connection=redis_connection(),
+            default_timeout=app.config["JOB_TIMEOUT"],
+        )
+    return app._job_queue  # type: ignore[return-value]
+
+
+def is_s3_enabled() -> bool:
+    return bool(app.config.get("S3_BUCKET"))
+
+
+def s3_client():
+    if not is_s3_enabled():
+        raise RuntimeError("Object storage is not configured.")
+    if not hasattr(app, "_s3_client"):
+        client_kwargs: dict[str, Any] = {}
+        if S3_REGION:
+            client_kwargs["region_name"] = S3_REGION
+        app._s3_client = boto3.client("s3", **client_kwargs)
+    return app._s3_client
+
+
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -209,6 +286,80 @@ def strip_known_extensions(name: str) -> str:
         else:
             break
     return base
+
+
+def job_storage_key(job_id: str) -> str:
+    return f"job:{job_id}"
+
+
+def load_job_record(job_id: str) -> Optional[dict]:
+    raw_value = redis_connection().get(job_storage_key(job_id))
+    if not raw_value:
+        return None
+    try:
+        return json.loads(raw_value)
+    except json.JSONDecodeError:
+        logging.warning("Corrupt job record for %s", job_id)
+    return None
+
+
+def persist_job_record(record: dict) -> None:
+    ttl = app.config.get("JOB_RESULT_TTL", JOB_RESULT_TTL)
+    redis_connection().setex(job_storage_key(record["id"]), ttl, json.dumps(record))
+
+
+def update_job_record(job_id: str, updates: dict) -> Optional[dict]:
+    record = load_job_record(job_id)
+    if not record:
+        return None
+    record.update(updates)
+    persist_job_record(record)
+    return record
+
+
+def mark_job_status(job_id: str, status: str, extra: Optional[dict] = None) -> Optional[dict]:
+    payload = {"status": status, "updated_at": datetime.utcnow().isoformat()}
+    if extra:
+        payload.update(extra)
+    return update_job_record(job_id, payload)
+
+
+def public_job_view(record: dict) -> dict:
+    allowed_keys = {
+        "id",
+        "status",
+        "style",
+        "ratios",
+        "files",
+        "results",
+        "progress",
+        "created_at",
+        "queued_at",
+        "started_at",
+        "completed_at",
+        "message",
+    }
+    return {key: record.get(key) for key in allowed_keys if key in record}
+
+
+def ensure_job_naming(record: dict) -> dict:
+    naming_cfg = record.get("naming")
+    if isinstance(naming_cfg, dict):
+        return naming_cfg
+    config = build_naming_config(record["id"], None)
+    record["naming"] = config
+    persist_job_record(record)
+    return config
+
+
+def store_job_progress(job_id: str, progress: float, message: Optional[str] = None) -> Optional[dict]:
+    payload = {
+        "progress": round(max(0.0, min(1.0, progress)), 4),
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    if message is not None:
+        payload["message"] = message
+    return update_job_record(job_id, payload)
 
 
 def remove_naming_tokens(text: str) -> str:
@@ -478,34 +629,32 @@ def append_summary(job_id: str, entry: dict, config: Optional[dict] = None) -> N
 
 
 def resize_by_factor(clip: VideoFileClip, factor: float):
-    return clip.fx(vfx.resize, factor)
+    return clip.resize(factor)
 
 
-def crop_center(clip, target_w, target_h):
-    """Center-crop to (target_w, target_h) using v1 API."""
-    w, h = clip.size
-    x1 = max(0, (w - target_w)//2)
-    y1 = max(0, (h - target_h)//2)
-    x2 = min(w, x1 + target_w)
-    y2 = min(h, y1 + target_h)
-    return clip.fx(vfx.crop, x1=x1, y1=y1, x2=x2, y2=y2)
+def crop_center(clip, width: int, height: int):
+    return clip.crop(
+        width=int(width),
+        height=int(height),
+        x_center=clip.w / 2,
+        y_center=clip.h / 2,
+    )
 
-def apply_gaussian_blur(clip, radius=16):
-    """
-    MoviePy v1-compatible Gaussian blur using Pillow.
-    Applies a per-frame blur: returns a new clip.
-    """
-    def _blur(frame):
-        # frame is a HxWx3/4 uint8 numpy array
+def apply_gaussian_blur(clip, radius: float):
+    def blur_frame(frame):
         return np.array(Image.fromarray(frame).filter(ImageFilter.GaussianBlur(radius)))
-    return clip.fl_image(_blur)
+
+    blurred = clip.fl_image(blur_frame)
+    if clip.mask is not None:
+        blurred.mask = clip.mask
+    return blurred
 
 
 def build_blurred_letterbox(clip: VideoFileClip, target_size: tuple[int, int]):
     target_w, target_h = target_size
     # Keep the original framing centered within the target size.
     fit_scale = min(target_w / clip.w, target_h / clip.h)
-    letterboxed = resize_by_factor(clip, fit_scale).set_position("center")
+    letterboxed = resize_by_factor(clip, fit_scale).set_position(("center", "center"))
 
     # Create a blurred background that fills the target canvas.
     fill_scale = max(target_w / clip.w, target_h / clip.h)
@@ -525,7 +674,7 @@ def build_blurred_letterbox(clip: VideoFileClip, target_size: tuple[int, int]):
 def build_black_letterbox(clip: VideoFileClip, target_size: tuple[int, int]):
     target_w, target_h = target_size
     fit_scale = min(target_w / clip.w, target_h / clip.h)
-    letterboxed = resize_by_factor(clip, fit_scale).set_position("center")
+    letterboxed = resize_by_factor(clip, fit_scale).set_position(("center", "center"))
 
     background = ColorClip(size=(target_w, target_h), color=(0, 0, 0))
     background = background.set_duration(clip.duration)
@@ -757,6 +906,326 @@ def api_process():
     }
 
 
+def validate_reward_token(token: Optional[str]) -> bool:
+    # Placeholder for rewarded ad verification hook.
+    return bool(token)
+
+
+@app.post("/api/upload-url")
+def api_upload_url():
+    if not is_s3_enabled():
+        return {"error": "Object storage not configured."}, 503
+    payload = request.get_json(silent=True) or {}
+    filename = (payload.get("filename") or "").strip()
+    if not filename or not allowed_file(filename):
+        return {"error": "Provide a supported video filename."}, 400
+
+    try:
+        declared_size = int(payload.get("size") or 0)
+    except (TypeError, ValueError):
+        declared_size = 0
+    if declared_size <= 0 or declared_size > app.config["MAX_UPLOAD_SIZE_BYTES"]:
+        return {
+            "error": f"Each file must be between 1 byte and {app.config['MAX_UPLOAD_SIZE_BYTES']} bytes.",
+        }, 400
+
+    content_type = (payload.get("content_type") or "video/mp4").strip()
+    if not content_type.startswith("video/"):
+        return {"error": "Only video uploads are supported."}, 400
+
+    job_id = (payload.get("job_id") or "").strip() or uuid.uuid4().hex
+    extension = Path(filename).suffix.lower() or ".mp4"
+    key = payload.get("key") or f"{app.config['S3_UPLOAD_PREFIX'].rstrip('/')}/{job_id}/{uuid.uuid4().hex}{extension}"
+
+    try:
+        presigned = s3_client().generate_presigned_post(
+            Bucket=app.config["S3_BUCKET"],
+            Key=key,
+            Fields={"Content-Type": content_type},
+            Conditions=[
+                {"Content-Type": content_type},
+                ["content-length-range", 1, app.config["MAX_UPLOAD_SIZE_BYTES"]],
+            ],
+            ExpiresIn=app.config["UPLOAD_URL_TTL"],
+        )
+    except Exception:
+        logging.exception("Failed to create presigned POST for %s", filename)
+        return {"error": "Unable to generate upload URL."}, 500
+
+    return {
+        "job_id": job_id,
+        "upload": presigned,
+        "file": {
+            "key": key,
+            "original_name": filename,
+            "content_type": content_type,
+            "size": declared_size,
+        },
+        "expires_in": app.config["UPLOAD_URL_TTL"],
+    }, 201
+
+
+@app.post("/api/jobs")
+def api_create_job():
+    data = request.get_json(silent=True) or {}
+    job_id = (data.get("job_id") or "").strip() or uuid.uuid4().hex
+
+    raw_files = data.get("files") or []
+    if not isinstance(raw_files, list) or not raw_files:
+        return {"error": "Attach at least one uploaded file."}, 400
+    if len(raw_files) > app.config["MAX_UPLOAD_FILES"]:
+        return {"error": f"Maximum {app.config['MAX_UPLOAD_FILES']} files per batch."}, 400
+
+    cleaned_files = []
+    for entry in raw_files:
+        if not isinstance(entry, dict):
+            continue
+        key = (entry.get("key") or "").strip()
+        original_name = (entry.get("original_name") or entry.get("name") or "").strip()
+        if not key or not original_name:
+            return {"error": "Each file must include both a storage key and original name."}, 400
+        if not allowed_file(original_name):
+            return {"error": f"Unsupported file type: {original_name}"}, 400
+        try:
+            size = int(entry.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size <= 0 or size > app.config["MAX_UPLOAD_SIZE_BYTES"]:
+            return {"error": f"Invalid size for {original_name}."}, 400
+        cleaned_files.append(
+            {
+                "key": key,
+                "original_name": original_name,
+                "size": size,
+                "content_type": (entry.get("content_type") or "video/mp4").strip(),
+                "base_override": (entry.get("base_override") or "").strip() or None,
+            }
+        )
+
+    if not cleaned_files:
+        return {"error": "No valid files provided."}, 400
+
+    style = (data.get("style") or "blur").strip()
+    if style not in STYLE_LABELS:
+        style = "blur"
+
+    ratios = [r for r in (data.get("ratios") or []) if r in ASPECT_OPTIONS]
+    if not ratios:
+        return {"error": "Select at least one aspect ratio."}, 400
+    if len(ratios) > 3:
+        ratios = ratios[:3]
+
+    naming_config = data.get("naming")
+    if not isinstance(naming_config, dict):
+        naming_config = build_naming_config(job_id, None)
+
+    record = {
+        "id": job_id,
+        "status": JOB_STATUS_PENDING,
+        "style": style,
+        "ratios": ratios,
+        "files": cleaned_files,
+        "results": [],
+        "progress": 0.0,
+        "message": "",
+        "created_at": datetime.utcnow().isoformat(),
+        "metadata": {
+            "reward_token": data.get("reward_token"),
+            "user_token": data.get("user_token"),
+        },
+        "naming": naming_config,
+    }
+    persist_job_record(record)
+    return {"job": public_job_view(record)}, 201
+
+
+@app.post("/api/jobs/<job_id>/start")
+def api_start_job(job_id: str):
+    record = load_job_record(job_id)
+    if not record:
+        return {"error": "Unknown job."}, 404
+    if record.get("status") not in {JOB_STATUS_PENDING, JOB_STATUS_FAILED}:
+        return {"job": public_job_view(record)}, 200
+
+    payload = request.get_json(silent=True) or {}
+    reward_token = payload.get("reward_token") or record.get("metadata", {}).get("reward_token")
+    if not validate_reward_token(reward_token):
+        return {"error": "Rewarded ad verification failed."}, 403
+
+    mark_job_status(
+        job_id,
+        JOB_STATUS_QUEUED,
+        {"queued_at": datetime.utcnow().isoformat(), "progress": 0.0, "message": ""},
+    )
+
+    try:
+        job_queue().enqueue(
+            "app.process_render_job",
+            job_id,
+            result_ttl=app.config["JOB_RESULT_TTL"],
+            failure_ttl=app.config["JOB_RESULT_TTL"],
+        )
+    except Exception:
+        logging.exception("Failed to enqueue job %s", job_id)
+        mark_job_status(job_id, JOB_STATUS_FAILED, {"message": "Queue unavailable."})
+        return {"error": "Unable to queue rendering job at the moment."}, 503
+
+    queued_record = load_job_record(job_id)
+    return {"job": public_job_view(queued_record or record)}, 202
+
+
+@app.get("/api/jobs/<job_id>/status")
+def api_job_status(job_id: str):
+    record = load_job_record(job_id)
+    if not record:
+        return {"error": "Unknown job."}, 404
+    return {"job": public_job_view(record)}, 200
+
+
+def process_render_job(job_id: str) -> None:
+    with app.app_context():
+        record = load_job_record(job_id)
+        if not record:
+            logging.warning("Skipping unknown job %s", job_id)
+            return
+
+        record["results"] = []
+        persist_job_record(record)
+
+        mark_job_status(
+            job_id,
+            JOB_STATUS_PROCESSING,
+            {"started_at": datetime.utcnow().isoformat(), "progress": 0.0, "message": ""},
+        )
+        naming_config = ensure_job_naming(record)
+
+        total_targets = len(record.get("files", [])) * max(1, len(record.get("ratios", [])))
+        if total_targets <= 0:
+            mark_job_status(job_id, JOB_STATUS_FAILED, {"message": "Job has no files or ratios."})
+            return
+
+        processed = 0
+        bucket = app.config.get("S3_BUCKET")
+        s3 = s3_client() if is_s3_enabled() else None
+
+        try:
+            for file_entry in record.get("files", []):
+                original_name = file_entry.get("original_name") or "clip.mp4"
+                base_override = file_entry.get("base_override")
+                storage_key = file_entry.get("key")
+                if not storage_key:
+                    raise ValueError(f"Missing storage key for {original_name}")
+
+                with tempfile.TemporaryDirectory(prefix=f"{job_id}_") as tmp_dir:
+                    tmp_dir_path = Path(tmp_dir)
+                    input_path = tmp_dir_path / Path(storage_key).name
+
+                    if is_s3_enabled():
+                        s3.download_file(bucket, storage_key, str(input_path))  # type: ignore[arg-type]
+                    else:
+                        local_candidate = Path(storage_key)
+                        if not local_candidate.is_absolute():
+                            local_candidate = app.config["UPLOAD_FOLDER"] / local_candidate
+                        if not local_candidate.exists():
+                            raise FileNotFoundError(f"Source file not found: {storage_key}")
+                        shutil.copy(local_candidate, input_path)
+
+                    with VideoFileClip(str(input_path)) as tmp_clip:
+                        duration = getattr(tmp_clip, "duration", None)
+                        if duration and duration > 180:
+                            raise ClipTooLongError("Max video length for MVP is 3 minutes (180 seconds).")
+
+                    base_info = prepare_base_info(original_name, base_override, naming_config)
+                    naming_state = {
+                        "config": naming_config,
+                        "base_info": base_info,
+                        "sequence_start": processed,
+                    }
+                    tmp_output_dir = tmp_dir_path / "outputs"
+                    results = render_variants(
+                        input_path,
+                        tmp_output_dir,
+                        record["style"],
+                        job_id,
+                        record["ratios"],
+                        naming_state,
+                        include_urls=False,
+                    )
+
+                    file_outputs = []
+                    for result in results:
+                        processed += 1
+                        output_file = tmp_output_dir / result["filename"]
+                        if not output_file.exists():
+                            continue
+
+                        if is_s3_enabled():
+                            output_key = f"{app.config['S3_OUTPUT_PREFIX'].rstrip('/')}/{job_id}/{result['filename']}"
+                            s3.upload_file(str(output_file), bucket, output_key)  # type: ignore[arg-type]
+                            download_url = s3.generate_presigned_url(
+                                "get_object",
+                                Params={"Bucket": bucket, "Key": output_key},
+                                ExpiresIn=app.config["DOWNLOAD_URL_TTL"],
+                            )
+                            storage_ref = {"key": output_key, "url": download_url}
+                        else:
+                            dest_dir = app.config["OUTPUT_FOLDER"] / job_id
+                            dest_dir.mkdir(parents=True, exist_ok=True)
+                            target_path = dest_dir / result["filename"]
+                            shutil.move(str(output_file), target_path)
+                            download_url = url_for(
+                                "download",
+                                job_id=job_id,
+                                filename=result["filename"],
+                                _external=True,
+                            )
+                            storage_ref = {"path": str(target_path), "url": download_url}
+
+                        file_outputs.append(
+                            {
+                                "label": result.get("label"),
+                                "ratio_label": result.get("ratio_label"),
+                                "filename": result["filename"],
+                                **storage_ref,
+                            }
+                        )
+                        store_job_progress(job_id, processed / max(1, total_targets))
+
+                    record["results"].append(
+                        {
+                            "original_name": original_name,
+                            "outputs": file_outputs,
+                        }
+                    )
+                    persist_job_record(record)
+
+            mark_job_status(
+                job_id,
+                JOB_STATUS_COMPLETED,
+                {
+                    "completed_at": datetime.utcnow().isoformat(),
+                    "progress": 1.0,
+                    "results": record["results"],
+                    "message": "Rendering finished.",
+                },
+            )
+        except ClipTooLongError as exc:
+            logging.warning("Job %s failed validation: %s", job_id, exc)
+            mark_job_status(
+                job_id,
+                JOB_STATUS_FAILED,
+                {"message": str(exc), "progress": 1.0, "failed_at": datetime.utcnow().isoformat()},
+            )
+        except Exception as exc:
+            logging.exception("Job %s failed", job_id)
+            mark_job_status(
+                job_id,
+                JOB_STATUS_FAILED,
+                {"message": str(exc), "progress": processed / max(1, total_targets), "failed_at": datetime.utcnow().isoformat()},
+            )
+            raise
+
+
 @app.route("/download/<job_id>/<path:filename>")
 def download(job_id: str, filename: str):
     target_dir = app.config["OUTPUT_FOLDER"] / job_id
@@ -811,6 +1280,7 @@ def write_clip(
     naming_state: dict,
     seq_number: Optional[int],
     logger: Optional[ProgressBarLogger],
+    include_url: bool = True,
 ):
     config = ASPECT_OPTIONS.get(aspect_key)
     if not config:
@@ -841,13 +1311,15 @@ def write_clip(
     finally:
         clip_obj.close()
 
-    return {
+    result = {
         "label": f"{config['label']} • {STYLE_LABELS.get(style, style)}",
         "filename": filename,
         "aspect_key": aspect_key,
         "ratio_label": tokens.get("ratio_token", config.get("short", aspect_key)),
-        "url": url_for("download", job_id=job_id, filename=filename),
     }
+    if include_url:
+        result["url"] = url_for("download", job_id=job_id, filename=filename)
+    return result
 
 
 def render_variants(
@@ -857,6 +1329,7 @@ def render_variants(
     job_id: str,
     ratios: list[str],
     naming_state: dict,
+    include_urls: bool = True,
 ) -> list[dict]:
     output_dir.mkdir(exist_ok=True, parents=True)
     outputs: list[dict] = []
@@ -888,6 +1361,7 @@ def render_variants(
                     naming_state,
                     seq_number,
                     logger,
+                    include_url=include_urls,
                 )
             )
 
