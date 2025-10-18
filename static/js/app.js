@@ -960,6 +960,7 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
     try {
       initializeProgress(files.length);
       const namingPayload = buildNamingPayload();
+      asyncStartTimestamp = Date.now();
 
       let jobId = (typeof crypto !== "undefined" && crypto.randomUUID)
         ? crypto.randomUUID()
@@ -1144,6 +1145,8 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
     return data.job;
   }
 
+  let asyncStartTimestamp = null;
+
   async function pollAsyncJob(jobId, totalFiles) {
     while (true) {
       const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/status`, {
@@ -1154,12 +1157,31 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
         throw new Error(data.error || `Failed to check job status (HTTP ${res.status})`);
       }
       const job = data.job;
-      const percent = Math.round(Math.max(0, Math.min(1, job.progress || 0)) * 100);
+      let progressValue = typeof job.progress === "number" ? Math.max(0, Math.min(1, job.progress)) : 0;
+      try {
+        const progressRes = await fetch(`/progress/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+        if (progressRes.ok) {
+          const progressPayload = await progressRes.json();
+          if (typeof progressPayload.progress === "number") {
+            progressValue = Math.max(progressValue, Math.max(0, Math.min(1, progressPayload.progress)));
+          }
+        }
+      } catch (error) {
+        // ignore fetch errors
+      }
+
+      const percent = Math.round(progressValue * 100);
       const statusText = job.status === "done" ? "Finalising…" : job.status === "failed" ? "Failed" : "Rendering…";
+      let subtitle = `${percent}% complete`;
+      if (progressValue > 0 && progressValue < 1 && asyncStartTimestamp) {
+        const elapsed = (Date.now() - asyncStartTimestamp) / 1000;
+        const etaSeconds = elapsed * (1 / progressValue - 1);
+        subtitle += ` • ~${formatEta(Math.max(0, etaSeconds))}`;
+      }
       updateProgressStatus(
         Math.max(targetProgress, percent || 0),
         statusText,
-        `${percent}% complete`
+        subtitle
       );
 
       if (job.status === "done") {
@@ -1188,6 +1210,26 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       label_mode: namingOptions.labelMode,
       date_stamp: dateStamp,
     };
+  }
+
+  function formatEta(seconds) {
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      return "0s";
+    }
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.round(seconds % 60);
+    if (mins <= 0) {
+      return `${secs}s`;
+    }
+    if (mins >= 60) {
+      const hours = Math.floor(mins / 60);
+      const remMins = mins % 60;
+      if (remMins <= 0) {
+        return `${hours}h`;
+      }
+      return `${hours}h ${remMins}m`;
+    }
+    return `${mins}m ${secs.toString().padStart(2, "0")}s`;
   }
 
   function renderAsyncResults(job) {
