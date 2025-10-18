@@ -651,7 +651,7 @@ def normalize_orientation(clip: VideoFileClip):
         angle = 0
 
     if angle in (90, 180, 270):
-        clip = clip.rotate(angle)
+        clip = clip.rotate(angle, expand=True)
         clip.rotation = 0
         if getattr(clip, "reader", None) and hasattr(clip.reader, "rotation"):
             clip.reader.rotation = 0
