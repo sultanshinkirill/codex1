@@ -153,10 +153,23 @@
     </p>
 
     <div class="actions">
-      <button id="async-button" class="primary-button" type="button">Render batch</button>
+      <button
+        id="async-button"
+        class="primary-button"
+        type="button"
+        {% if not async_enabled %}
+          disabled
+          aria-disabled="true"
+          data-disabled="true"
+          title="Async rendering requires Redis. Start Redis to enable this option."
+        {% endif %}
+      >Render batch</button>
       <button id="submit-button" class="secondary-button" type="submit">Render (fallback)</button>
       <button id="reset-button" class="secondary-button" type="button">Reset</button>
     </div>
+    {% if not async_enabled %}
+      <p class="muted" style="margin-top: 0.5rem;">Async rendering is offline. Start Redis and the worker, or use the fallback button.</p>
+    {% endif %}
   </form>
 
   {% set inline_active = ADS_CLIENT and ADS_SLOT_INLINE %}
@@ -207,6 +220,7 @@
       styles: {{ styles | tojson }},
       styleShort: {{ style_short_labels | tojson }},
       apiProcess: "{{ url_for('api_process') }}",
+      asyncEnabled: {{ async_enabled | tojson }},
       ads: {{ {
         "client": ADS_CLIENT,
         "slotTop": ADS_SLOT_TOP,
@@ -216,6 +230,7 @@
       } | tojson }}
     };
   </script>
+  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js"></script>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 
 {% endblock %}

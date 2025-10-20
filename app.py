@@ -21,6 +21,7 @@ from typing import Any, Optional
 import numpy as np
 import boto3
 import redis
+from redis.exceptions import RedisError
 from flask import (
     Flask,
     abort,
@@ -129,6 +130,8 @@ JOB_STATUS_PROCESSING = "processing"
 JOB_STATUS_COMPLETED = "completed"
 JOB_STATUS_FAILED = "failed"
 
+ASYNC_UNAVAILABLE_CODE = "ASYNC_UNAVAILABLE"
+
 
 def update_job_progress(job_id: str, value: float, status: str = "processing") -> None:
     JOB_PROGRESS[job_id] = {
@@ -169,6 +172,10 @@ JOB_PROGRESS: dict[str, dict] = {}
 
 class ClipTooLongError(Exception):
     """Raised when the uploaded clip exceeds the permitted duration."""
+
+
+class AsyncPipelineUnavailable(RuntimeError):
+    """Raised when the async rendering pipeline dependencies are unavailable."""
 
 
 RESOLUTION_PATTERN = re.compile(
@@ -243,23 +250,54 @@ def inject_ads():
 
 
 def redis_connection() -> redis.Redis:
-    if not hasattr(app, "_redis_conn"):
-        app._redis_conn = redis.from_url(app.config["REDIS_URL"])
-    return app._redis_conn  # type: ignore[arg-type]
+    url = app.config.get("REDIS_URL")
+    if not url:
+        raise AsyncPipelineUnavailable("Redis URL is not configured.")
+    cache = getattr(app, "_redis_conn", None)
+    if cache is None:
+        try:
+            cache = redis.from_url(url)
+        except RedisError as exc:
+            raise AsyncPipelineUnavailable("Unable to initialize Redis connection.") from exc
+        app._redis_conn = cache  # type: ignore[attr-defined]
+    return cache  # type: ignore[return-value]
+
+
+def _clear_cached_redis_connection() -> None:
+    if hasattr(app, "_redis_conn"):
+        delattr(app, "_redis_conn")
 
 
 def job_queue() -> Queue:
     if not hasattr(app, "_job_queue"):
-        app._job_queue = Queue(
-            app.config["JOB_QUEUE_NAME"],
-            connection=redis_connection(),
-            default_timeout=app.config["JOB_TIMEOUT"],
-        )
+        try:
+            app._job_queue = Queue(
+                app.config["JOB_QUEUE_NAME"],
+                connection=redis_connection(),
+                default_timeout=app.config["JOB_TIMEOUT"],
+            )
+        except AsyncPipelineUnavailable:
+            raise
+        except RedisError as exc:
+            _clear_cached_redis_connection()
+            raise AsyncPipelineUnavailable("Redis queue is unavailable.") from exc
     return app._job_queue  # type: ignore[return-value]
 
 
 def is_s3_enabled() -> bool:
     return bool(app.config.get("S3_BUCKET"))
+
+
+def async_pipeline_available() -> bool:
+    try:
+        connection = redis_connection()
+        connection.ping()
+    except AsyncPipelineUnavailable:
+        return False
+    except RedisError:
+        _clear_cached_redis_connection()
+        return False
+    return True
 
 
 def s3_client():
@@ -293,7 +331,15 @@ def job_storage_key(job_id: str) -> str:
 
 
 def load_job_record(job_id: str) -> Optional[dict]:
-    raw_value = redis_connection().get(job_storage_key(job_id))
+    try:
+        connection = redis_connection()
+    except AsyncPipelineUnavailable:
+        raise
+    try:
+        raw_value = connection.get(job_storage_key(job_id))
+    except RedisError as exc:
+        _clear_cached_redis_connection()
+        raise AsyncPipelineUnavailable("Unable to fetch job record.") from exc
     if not raw_value:
         return None
     try:
@@ -305,7 +351,15 @@ def load_job_record(job_id: str) -> Optional[dict]:
 
 def persist_job_record(record: dict) -> None:
     ttl = app.config.get("JOB_RESULT_TTL", JOB_RESULT_TTL)
-    redis_connection().setex(job_storage_key(record["id"]), ttl, json.dumps(record))
+    try:
+        connection = redis_connection()
+    except AsyncPipelineUnavailable:
+        raise
+    try:
+        connection.setex(job_storage_key(record["id"]), ttl, json.dumps(record))
+    except RedisError as exc:
+        _clear_cached_redis_connection()
+        raise AsyncPipelineUnavailable("Unable to persist job record.") from exc
 
 
 def update_job_record(job_id: str, updates: dict) -> Optional[dict]:
@@ -797,6 +851,7 @@ def index():
         aspects=ASPECT_OPTIONS,
         style_short_labels=STYLE_SHORT_LABELS,
         default_aspects=("portrait", "four_five", "square"),
+        async_enabled=async_pipeline_available(),
     )
 
 
@@ -1015,6 +1070,12 @@ def api_create_job():
     data = request.get_json(silent=True) or {}
     job_id = (data.get("job_id") or "").strip() or uuid.uuid4().hex
 
+    if not async_pipeline_available():
+        return {
+            "error": "Async rendering is unavailable. Use fallback rendering instead.",
+            "code": ASYNC_UNAVAILABLE_CODE,
+        }, 503
+
     raw_files = data.get("files") or []
     if not isinstance(raw_files, list) or not raw_files:
         return {"error": "Attach at least one uploaded file."}, 400
@@ -1080,13 +1141,30 @@ def api_create_job():
         },
         "naming": naming_config,
     }
-    persist_job_record(record)
+    try:
+        persist_job_record(record)
+    except AsyncPipelineUnavailable:
+        return {
+            "error": "Async rendering is unavailable. Use fallback rendering instead.",
+            "code": ASYNC_UNAVAILABLE_CODE,
+        }, 503
     return {"job": public_job_view(record)}, 201
 
 
 @app.post("/api/jobs/<job_id>/start")
 def api_start_job(job_id: str):
-    record = load_job_record(job_id)
+    if not async_pipeline_available():
+        return {
+            "error": "Async rendering is unavailable. Use fallback rendering instead.",
+            "code": ASYNC_UNAVAILABLE_CODE,
+        }, 503
+    try:
+        record = load_job_record(job_id)
+    except AsyncPipelineUnavailable:
+        return {
+            "error": "Async rendering is unavailable. Use fallback rendering instead.",
+            "code": ASYNC_UNAVAILABLE_CODE,
+        }, 503
     if not record:
         return {"error": "Unknown job."}, 404
     if record.get("status") not in {JOB_STATUS_PENDING, JOB_STATUS_FAILED}:
@@ -1097,11 +1175,17 @@ def api_start_job(job_id: str):
     if not validate_reward_token(reward_token):
         return {"error": "Rewarded ad verification failed."}, 403
 
-    mark_job_status(
-        job_id,
-        JOB_STATUS_QUEUED,
-        {"queued_at": datetime.utcnow().isoformat(), "progress": 0.0, "message": ""},
-    )
+    try:
+        mark_job_status(
+            job_id,
+            JOB_STATUS_QUEUED,
+            {"queued_at": datetime.utcnow().isoformat(), "progress": 0.0, "message": ""},
+        )
+    except AsyncPipelineUnavailable:
+        return {
+            "error": "Async rendering is unavailable. Use fallback rendering instead.",
+            "code": ASYNC_UNAVAILABLE_CODE,
+        }, 503
 
     try:
         job_queue().enqueue(
@@ -1110,18 +1194,41 @@ def api_start_job(job_id: str):
             result_ttl=app.config["JOB_RESULT_TTL"],
             failure_ttl=app.config["JOB_RESULT_TTL"],
         )
+    except AsyncPipelineUnavailable:
+        logging.warning("Failed to enqueue job %s: async pipeline unavailable", job_id)
+        return {
+            "error": "Async rendering is unavailable. Use fallback rendering instead.",
+            "code": ASYNC_UNAVAILABLE_CODE,
+        }, 503
     except Exception:
         logging.exception("Failed to enqueue job %s", job_id)
-        mark_job_status(job_id, JOB_STATUS_FAILED, {"message": "Queue unavailable."})
+        try:
+            mark_job_status(job_id, JOB_STATUS_FAILED, {"message": "Queue unavailable."})
+        except AsyncPipelineUnavailable:
+            pass
         return {"error": "Unable to queue rendering job at the moment."}, 503
 
-    queued_record = load_job_record(job_id)
+    try:
+        queued_record = load_job_record(job_id)
+    except AsyncPipelineUnavailable:
+        queued_record = None
     return {"job": public_job_view(queued_record or record)}, 202
 
 
 @app.get("/api/jobs/<job_id>/status")
 def api_job_status(job_id: str):
-    record = load_job_record(job_id)
+    if not async_pipeline_available():
+        return {
+            "error": "Async rendering is unavailable. Use fallback rendering instead.",
+            "code": ASYNC_UNAVAILABLE_CODE,
+        }, 503
+    try:
+        record = load_job_record(job_id)
+    except AsyncPipelineUnavailable:
+        return {
+            "error": "Async rendering is unavailable. Use fallback rendering instead.",
+            "code": ASYNC_UNAVAILABLE_CODE,
+        }, 503
     if not record:
         return {"error": "Unknown job."}, 404
     return {"job": public_job_view(record)}, 200
@@ -1129,24 +1236,43 @@ def api_job_status(job_id: str):
 
 def process_render_job(job_id: str) -> None:
     with app.app_context():
-        record = load_job_record(job_id)
+        try:
+            record = load_job_record(job_id)
+        except AsyncPipelineUnavailable:
+            logging.warning("Async pipeline unavailable; cannot process job %s", job_id)
+            return
         if not record:
             logging.warning("Skipping unknown job %s", job_id)
             return
 
         record["results"] = []
-        persist_job_record(record)
+        try:
+            persist_job_record(record)
+        except AsyncPipelineUnavailable:
+            logging.warning("Async pipeline unavailable; cannot update job %s before processing", job_id)
+            return
 
-        mark_job_status(
-            job_id,
-            JOB_STATUS_PROCESSING,
-            {"started_at": datetime.utcnow().isoformat(), "progress": 0.0, "message": ""},
-        )
-        naming_config = ensure_job_naming(record)
+        try:
+            mark_job_status(
+                job_id,
+                JOB_STATUS_PROCESSING,
+                {"started_at": datetime.utcnow().isoformat(), "progress": 0.0, "message": ""},
+            )
+        except AsyncPipelineUnavailable:
+            logging.warning("Async pipeline unavailable; cannot mark job %s as processing", job_id)
+            return
+        try:
+            naming_config = ensure_job_naming(record)
+        except AsyncPipelineUnavailable:
+            logging.warning("Async pipeline unavailable; cannot load naming config for job %s", job_id)
+            return
 
         total_targets = len(record.get("files", [])) * max(1, len(record.get("ratios", [])))
         if total_targets <= 0:
-            mark_job_status(job_id, JOB_STATUS_FAILED, {"message": "Job has no files or ratios."})
+            try:
+                mark_job_status(job_id, JOB_STATUS_FAILED, {"message": "Job has no files or ratios."})
+            except AsyncPipelineUnavailable:
+                pass
             return
 
         processed = 0
@@ -1234,7 +1360,10 @@ def process_render_job(job_id: str) -> None:
                                 **storage_ref,
                             }
                         )
-                        store_job_progress(job_id, processed / max(1, total_targets))
+                        try:
+                            store_job_progress(job_id, processed / max(1, total_targets))
+                        except AsyncPipelineUnavailable:
+                            logging.warning("Async pipeline unavailable; unable to store progress for job %s", job_id)
 
                     record["results"].append(
                         {
@@ -1242,32 +1371,48 @@ def process_render_job(job_id: str) -> None:
                             "outputs": file_outputs,
                         }
                     )
-                    persist_job_record(record)
+                    try:
+                        persist_job_record(record)
+                    except AsyncPipelineUnavailable:
+                        logging.warning("Async pipeline unavailable; unable to persist progress for job %s", job_id)
 
-            mark_job_status(
-                job_id,
-                JOB_STATUS_COMPLETED,
-                {
-                    "completed_at": datetime.utcnow().isoformat(),
-                    "progress": 1.0,
-                    "results": record["results"],
-                    "message": "Rendering finished.",
-                },
-            )
+            try:
+                mark_job_status(
+                    job_id,
+                    JOB_STATUS_COMPLETED,
+                    {
+                        "completed_at": datetime.utcnow().isoformat(),
+                        "progress": 1.0,
+                        "results": record["results"],
+                        "message": "Rendering finished.",
+                    },
+                )
+            except AsyncPipelineUnavailable:
+                logging.warning("Async pipeline unavailable; unable to mark job %s complete", job_id)
         except ClipTooLongError as exc:
             logging.warning("Job %s failed validation: %s", job_id, exc)
-            mark_job_status(
-                job_id,
-                JOB_STATUS_FAILED,
-                {"message": str(exc), "progress": 1.0, "failed_at": datetime.utcnow().isoformat()},
-            )
+            try:
+                mark_job_status(
+                    job_id,
+                    JOB_STATUS_FAILED,
+                    {"message": str(exc), "progress": 1.0, "failed_at": datetime.utcnow().isoformat()},
+                )
+            except AsyncPipelineUnavailable:
+                pass
         except Exception as exc:
             logging.exception("Job %s failed", job_id)
-            mark_job_status(
-                job_id,
-                JOB_STATUS_FAILED,
-                {"message": str(exc), "progress": processed / max(1, total_targets), "failed_at": datetime.utcnow().isoformat()},
-            )
+            try:
+                mark_job_status(
+                    job_id,
+                    JOB_STATUS_FAILED,
+                    {
+                        "message": str(exc),
+                        "progress": processed / max(1, total_targets),
+                        "failed_at": datetime.utcnow().isoformat(),
+                    },
+                )
+            except AsyncPipelineUnavailable:
+                pass
             raise
 
 

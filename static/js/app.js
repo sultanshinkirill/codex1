@@ -4,6 +4,15 @@
   const styleLabels = config.styles || {};
   const styleShortLabels = config.styleShort || {};
   const adConfig = config.ads || {};
+  const ASYNC_UNAVAILABLE_CODE = "ASYNC_UNAVAILABLE";
+  let asyncEnabled = config.asyncEnabled !== false;
+  const { createFFmpeg, fetchFile } = window.FFmpeg || {};
+  let ffmpegInstance = null;
+  let ffmpegReady = false;
+  let ffmpegLoadingPromise = null;
+  const CLIENT_RENDER_MODE = "client";
+  let ffmpegProgressCallback = null;
+  const FFMPEG_CORE_URL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js";
 
   if (typeof window.launchRewardedAd !== "function") {
     window.launchRewardedAd = async (options = {}) => {
@@ -69,6 +78,146 @@
   const NAMING_STORAGE_KEY = "vibeNamingOptions_v2";
   const defaultAspect = { short: "1x1", label: "1:1 Square", size: [1080, 1080] };
 
+  const VIDEO_EXTENSION_SET = new Set(videoExtensions);
+
+  function stripKnownExtensions(name) {
+    let base = name;
+    while (true) {
+      const dotIndex = base.lastIndexOf(".");
+      if (dotIndex <= 0) {
+        break;
+      }
+      const suffix = base.slice(dotIndex).toLowerCase();
+      if (VIDEO_EXTENSION_SET.has(suffix)) {
+        base = base.slice(0, dotIndex);
+      } else {
+        break;
+      }
+    }
+    return base;
+  }
+
+  function removeNamingTokens(text) {
+    if (!text) return "";
+    let cleaned = text;
+    const resolutionPattern = /\d{3,4}\s*(?:x|×|\*|\/|:|-|_|(?:\s+by\s+))\s*\d{3,4}/gi;
+    const aspectPattern = /\b\d(?:\.\d+)?\s*(?:x|×|:|\/|\s+by\s+)\s*\d(?:\.\d+)?\b/gi;
+    const wordPattern = /\b(portrait|vertical|landscape|square)\b/gi;
+    cleaned = cleaned.replace(resolutionPattern, " ");
+    cleaned = cleaned.replace(aspectPattern, " ");
+    cleaned = cleaned.replace(wordPattern, " ");
+    cleaned = cleaned.replace(/[._\-]{2,}/g, " ");
+    cleaned = cleaned.replace(/\s+/g, " ");
+    return cleaned.trim();
+  }
+
+  function sanitizeComponent(text) {
+    return (text || "")
+      .replace(/[^A-Za-z0-9._-]+/g, "_")
+      .replace(/_+/g, "_")
+      .replace(/-+/g, "-")
+      .replace(/\s+/g, "_")
+      .replace(/^[_\-.]+|[_\-.]+$/g, "") || "clip";
+  }
+
+  function cleanStub(originalName, keepTokens = false) {
+    let base = stripKnownExtensions(originalName || "");
+    base = base.trim();
+    if (!keepTokens) {
+      base = removeNamingTokens(base);
+    }
+    return sanitizeComponent(base);
+  }
+
+  function prepareBaseInfo(originalName, override, config) {
+    const sourceName = override ? override.trim() : originalName;
+    const baseCandidate = stripKnownExtensions(sourceName || "");
+    const sanitizedBase = sanitizeComponent(baseCandidate);
+    const autoClean = config.auto_clean !== false && !config.keep_tokens;
+    const baseClean = autoClean ? cleanStub(baseCandidate, false) : sanitizedBase;
+    return {
+      base: sanitizedBase || "clip",
+      base_clean: baseClean || "clip",
+      original_filename: originalName,
+    };
+  }
+
+  function sanitizeFilename(candidate, ext) {
+    const normalizedExt = ext ? (ext.startsWith(".") ? ext : `.${ext}`) : "";
+    let base = candidate || "clip";
+    base = base.replace(/[^A-Za-z0-9._-]+/g, "_");
+    base = base.replace(/_+/g, "_").replace(/-+/g, "-");
+    base = base.replace(/\s+/g, "_").replace(/^[_\-.]+|[_\-.]+$/g, "");
+    if (!base) base = "clip";
+    let full = `${base}${normalizedExt}`;
+    if (full.length > 120) {
+      const maxBase = Math.max(1, 120 - normalizedExt.length);
+      full = `${base.slice(0, maxBase)}${normalizedExt}`;
+    }
+    return full;
+  }
+
+  function ensureUniqueName(existingSet, filename) {
+    if (!existingSet.has(filename)) {
+      existingSet.add(filename);
+      return filename;
+    }
+    const dot = filename.lastIndexOf(".");
+    const base = dot >= 0 ? filename.slice(0, dot) : filename;
+    const ext = dot >= 0 ? filename.slice(dot) : "";
+    let counter = 1;
+    let candidate = filename;
+    while (existingSet.has(candidate)) {
+      const suffix = `__${String(counter).padStart(3, "0")}`;
+      candidate = `${base}${suffix}${ext}`;
+      counter += 1;
+    }
+    existingSet.add(candidate);
+    return candidate;
+  }
+
+  function generateOutputFilename(baseInfo, aspectKey, styleKey, configObj, seqNumber, ext, existingNames, dateStamp) {
+    const ratioMeta = aspectOptions[aspectKey] || defaultAspect;
+    const styleLong = styleLabels[styleKey] || styleKey;
+    const styleShort = styleShortLabels[styleKey] || styleKey;
+    const ratioShort = ratioMeta.short || aspectKey;
+    const ratioFriendly = ratioMeta.label || aspectKey;
+    const labelMode = configObj.label_mode === "friendly" ? "friendly" : "short";
+    const ratioToken = labelMode === "friendly" ? ratioFriendly : ratioShort;
+    const styleToken = labelMode === "friendly" ? styleLong : styleShort;
+    const seqValue = typeof seqNumber === "number" ? String(seqNumber).padStart(3, "0") : "";
+    const tokens = new Map([
+      ["base", baseInfo.base],
+      ["base_clean", baseInfo.base_clean],
+      ["ratio", ratioToken],
+      ["style", styleToken],
+      ["w", ratioMeta.size ? ratioMeta.size[0] : 0],
+      ["h", ratioMeta.size ? ratioMeta.size[1] : 0],
+      ["date", dateStamp || configObj.date_stamp || new Date().toISOString().slice(0, 10)],
+      ["seq", seqValue],
+      ["ext", ext.replace(/^\./, "")],
+    ]);
+
+    const rawPattern = (configObj.pattern || "{base_clean}_{ratio}").toString();
+    const formatted = rawPattern.replace(/\{([^}]+)\}/g, (_, key) => {
+      const value = tokens.get(key);
+      return value == null ? "" : String(value);
+    }).replace(/[_\-\s]+$/g, "").replace(/^[_\-\s]+/g, "");
+
+    let finalName = formatted || `${baseInfo.base_clean}_${ratioToken}`;
+    const normalizedPattern = rawPattern.toLowerCase();
+    if (configObj.add_sequence !== false && !normalizedPattern.includes("{seq}") && seqValue) {
+      finalName = `${finalName}__${seqValue}`;
+    }
+    const dateToken = tokens.get("date");
+    if (configObj.append_date !== false && !normalizedPattern.includes("{date}") && dateToken) {
+      finalName = `${finalName}__${dateToken}`;
+    }
+
+    const sanitized = sanitizeFilename(finalName, ext);
+    return ensureUniqueName(existingNames, sanitized);
+  }
+
   const namingDefaults = {
     mode: "auto",
     preset: "base_ratio",
@@ -79,6 +228,31 @@
     appendDate: false,
     labelMode: "short",
   };
+
+  async function ensureFfmpegLoaded() {
+    if (ffmpegReady && ffmpegInstance) {
+      return ffmpegInstance;
+    }
+    if (!createFFmpeg) {
+      throw new Error("FFmpeg WASM is unavailable in this browser.");
+    }
+    if (!ffmpegLoadingPromise) {
+      ffmpegInstance = createFFmpeg({
+        log: true,
+        corePath: FFMPEG_CORE_URL,
+      });
+      ffmpegLoadingPromise = ffmpegInstance.load().then(() => {
+        ffmpegInstance.setProgress(({ ratio }) => {
+          if (typeof ffmpegProgressCallback === "function") {
+            ffmpegProgressCallback(Math.max(0, Math.min(1, ratio || 0)));
+          }
+        });
+        ffmpegReady = true;
+        return ffmpegInstance;
+      });
+    }
+    return ffmpegLoadingPromise;
+  }
 
   let namingOptions = loadNamingOptions();
   let baseOverrides = {};
@@ -589,6 +763,7 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
 
   function resetProgress() {
     stopProgressAnimation();
+    stopProcessingPolling();
     displayedProgress = 0;
     targetProgress = 0;
     progressBar.value = 0;
@@ -929,6 +1104,16 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       }
       await handleAsyncBatch();
     });
+
+    if (!asyncEnabled) {
+      asyncButton.title = "Server queue unavailable; using client-side renderer.";
+      asyncButton.setAttribute("data-mode", CLIENT_RENDER_MODE);
+      asyncButton.textContent = "Render batch (client)";
+    } else {
+      asyncButton.removeAttribute("data-mode");
+      asyncButton.textContent = "Render batch";
+      asyncButton.removeAttribute("title");
+    }
   }
 
   async function handleAsyncBatch() {
@@ -954,80 +1139,314 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       return;
     }
 
+    try {
+      await performClientSideRender(files, warnings, selectedRatios);
+    } catch (error) {
+      console.error(error);
+      showFlash("Client-side rendering failed. Falling back to server renderer.", "error");
+      await performFallbackRender(files, warnings, selectedRatios);
+    }
+  }
+
+  function buildFfmpegFilters(styleKey, targetW, targetH) {
+    const filters = {};
+    if (styleKey === "fill") {
+      filters.videoArgs = [
+        "-vf",
+        `scale=${targetW}:${targetH}:force_original_aspect_ratio=increase,crop=${targetW}:${targetH},format=yuv420p`,
+      ];
+    } else if (styleKey === "black") {
+      filters.videoArgs = [
+        "-vf",
+        `scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease,pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p`,
+      ];
+    } else {
+      const filterComplex = [
+        `[0:v]scale=${targetW}:${targetH}:force_original_aspect_ratio=increase,crop=${targetW}:${targetH},boxblur=32:1[bg];`,
+        `[0:v]scale=${targetW}:${targetH}:force_original_aspect_ratio=decrease,pad=${targetW}:${targetH}:(ow-iw)/2:(oh-ih)/2[fg];`,
+        `[bg][fg]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2:format=yuv420p[vout]`,
+      ].join("");
+      filters.videoArgs = ["-filter_complex", filterComplex, "-map", "[vout]"];
+    }
+    return filters;
+  }
+
+  async function performClientSideRender(files, warnings, selectedRatios) {
+    if (!createFFmpeg) {
+      throw new Error("FFmpeg WASM is unavailable.");
+    }
+
     toggleForm(true);
     updateOverridesInput();
+    downloadAllLink.href = "#";
+    downloadAllLink.setAttribute("aria-disabled", "true");
+    downloadAllLink.title = "Bundle download is unavailable for client-side renders.";
+
+    const totalTargets = Math.max(1, files.length * selectedRatios.length);
+    initializeProgress(totalTargets);
+    const namingConfig = buildNamingPayload();
+    const dateStamp = namingConfig.date_stamp || new Date().toISOString().slice(0, 10);
+    let processedTargets = 0;
+    const uniqueNames = new Set();
+    const styleKey = styleSelector();
+    const finalResults = [];
+
+    const ffmpeg = await ensureFfmpegLoaded();
 
     try {
-      initializeProgress(files.length);
-      const namingPayload = buildNamingPayload();
-      asyncStartTimestamp = Date.now();
+      for (const [fileIndex, file] of files.entries()) {
+        const override = namingOptions.mode === "custom" ? (baseOverrides[file.name] || "") : "";
+        const baseInfo = prepareBaseInfo(file.name, override, namingConfig);
+        const inputName = `input_${Date.now()}_${Math.random().toString(16).slice(2)}.mp4`;
+        ffmpeg.FS("writeFile", inputName, await fetchFile(file));
 
-      let jobId = (typeof crypto !== "undefined" && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `job_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        const outputs = [];
+        const ratioLabels = new Set();
 
-      const uploadedRecords = [];
+        try {
+          for (const [ratioIndex, aspectKey] of selectedRatios.entries()) {
+            const aspectMeta = aspectOptions[aspectKey] || defaultAspect;
+            const [targetW, targetH] = aspectMeta.size || [1080, 1080];
+            const filters = buildFfmpegFilters(styleKey, targetW, targetH);
+            const outputName = `output_${fileIndex}_${ratioIndex}_${Date.now()}.mp4`;
+            const seqNumber = processedTargets + 1;
+            const filename = generateOutputFilename(
+              baseInfo,
+              aspectKey,
+              styleKey,
+              namingConfig,
+              seqNumber,
+              "mp4",
+              uniqueNames,
+              dateStamp
+            );
+            const ratioLabel = namingConfig.label_mode === "friendly"
+              ? (aspectMeta.label || aspectKey)
+              : (aspectMeta.short || aspectKey);
+            ratioLabels.add(ratioLabel);
 
-      for (const [index, file] of files.entries()) {
-        updateProgressStatus(
-          Math.min(25, ((index) / Math.max(files.length, 1)) * 20 + 5),
-          `Uploading ${file.name}`,
-          `${index + 1} of ${files.length} clip(s) queued`
-        );
+            ffmpegProgressCallback = (fraction) => {
+              updateOverallProgress(
+                processedTargets,
+                fraction,
+                totalTargets,
+                `Rendering ${file.name}`,
+                `${fileIndex + 1} of ${files.length} clip(s) • ${aspectMeta.label || ratioLabel}`
+              );
+            };
 
-        const uploadResult = await uploadAsyncFile(file, jobId);
-        if (uploadResult.job_id) {
-          jobId = uploadResult.job_id;
+            const args = [
+              "-i", inputName,
+              ...filters.videoArgs,
+              "-c:v", "libx264",
+              "-preset", "veryfast",
+              "-crf", "20",
+              "-pix_fmt", "yuv420p",
+              "-movflags", "faststart",
+              "-c:a", "aac",
+              "-b:a", "128k",
+              "-map", "0:a?",
+              outputName,
+            ];
+
+            await ffmpeg.run(...args);
+            ffmpegProgressCallback = null;
+            processedTargets += 1;
+            updateOverallProgress(
+              processedTargets,
+              0,
+              totalTargets,
+              `Rendering ${file.name}`,
+              `${processedTargets} of ${totalTargets} outputs ready`
+            );
+
+            let blobUrl = null;
+            try {
+              const data = ffmpeg.FS("readFile", outputName);
+              const blob = new Blob([data.buffer], { type: "video/mp4" });
+              blobUrl = URL.createObjectURL(blob);
+            } finally {
+              try {
+                ffmpeg.FS("unlink", outputName);
+              } catch (cleanupError) {
+                console.warn("Failed to remove ffmpeg output:", cleanupError);
+              }
+            }
+
+            outputs.push({
+              url: blobUrl,
+              label: `${aspectMeta.label || ratioLabel} • ${styleLabels[styleKey] || styleKey}`,
+              filename,
+              ratio_label: ratioLabel,
+            });
+          }
+        } finally {
+          try {
+            ffmpeg.FS("unlink", inputName);
+          } catch (cleanupError) {
+            console.warn("Failed to remove ffmpeg input:", cleanupError);
+          }
         }
-        uploadedRecords.push(uploadResult.record);
 
-        updateProgressStatus(
-          Math.min(45, ((index + 1) / Math.max(files.length, 1)) * 30 + 10),
-          `Uploaded ${file.name}`,
-          `${index + 1} of ${files.length} clip(s) uploaded`
-        );
+        finalResults.push({
+          original_name: file.name,
+          style_label: styleLabels[styleKey] || styleKey,
+          ratio_labels: Array.from(ratioLabels),
+          outputs,
+        });
       }
 
-      const job = await createAsyncJob({
-        job_id: jobId,
-        files: uploadedRecords,
-        ratios: selectedRatios,
-        style: styleSelector(),
-        naming: namingPayload,
-      });
-      jobId = job.id;
+      resultsSection.classList.remove("hidden");
+      finalResults.forEach((entry) => appendResultCard(entry));
 
-      updateProgressStatus(
-        Math.max(targetProgress, 55),
-        "Awaiting rewarded ad",
-        "Complete the ad to begin rendering."
-      );
-
-      const adResult = await launchRewardedAd({ jobId });
-      const rewardToken = adResult?.detail?.token || null;
-
-      await startAsyncJob(jobId, rewardToken);
-      updateProgressStatus(
-        Math.max(targetProgress, 60),
-        "Rendering…",
-        "0% complete"
-      );
-
-      const finalJob = await pollAsyncJob(jobId, files.length);
-      renderAsyncResults(finalJob);
-
-      const messages = [];
+      const totalOutputs = finalResults.reduce((sum, entry) => sum + entry.outputs.length, 0);
+      const messages = [`Rendered ${totalOutputs} clip(s).`];
       if (warnings.length) {
         messages.push(`Warnings: ${warnings.join(" • ")}`);
       }
-      showFlash(["Batch completed successfully.", ...messages].join(" • "), "success");
-    } catch (error) {
-      console.error(error);
-      showFlash(error.message || "Unable to render batch asynchronously.");
-      resetProgress();
+      showFlash(messages.join(" • "), "success");
     } finally {
+      ffmpegProgressCallback = null;
       toggleForm(false);
     }
+  }
+
+  async function performFallbackRender(files, warnings, selectedRatios) {
+    toggleForm(true);
+    updateOverridesInput();
+
+    const errors = [];
+    const total = files.length;
+    let processed = 0;
+    let batchId = (typeof crypto !== "undefined" && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `batch_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+    initializeProgress(total);
+
+    for (const [index, file] of files.entries()) {
+      const fileSize = file.size || 0;
+      updateOverallProgress(
+        processed,
+        0,
+        total,
+        `Preparing ${file.name}`,
+        `${index + 1} of ${total} clip(s) queued`
+      );
+
+      await new Promise((resolve) => {
+        const formData = new FormData();
+        formData.append("style", styleSelector());
+        formData.append("batch_id", batchId);
+        formData.append("video", file);
+        selectedRatios.forEach((ratio) => formData.append("ratios", ratio));
+        applyNamingToFormData(formData, file.name);
+
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", apiProcessUrl);
+        xhr.responseType = "json";
+
+        xhr.upload.onprogress = (event) => {
+          if (!event.lengthComputable) {
+            return;
+          }
+          const perFileRatio = fileSize ? Math.min(1, event.loaded / fileSize) : 0;
+          updateOverallProgress(
+            processed,
+            0,
+            total,
+            `Uploading ${file.name}`,
+            `${index + 1} of ${total} clip(s): ${(perFileRatio * 100).toFixed(0)}% uploaded`
+          );
+        };
+
+        xhr.upload.onload = () => {
+          updateOverallProgress(
+            processed,
+            0,
+            total,
+            `Processing ${file.name}`,
+            `${index + 1} of ${total} clip(s) uploaded`
+          );
+          startProcessingPolling(batchId, file.name, index, total, processed);
+        };
+
+        xhr.onerror = () => {
+          errors.push(`${file.name}: network error`);
+          stopProcessingPolling();
+          updateOverallProgress(processed, 0, total, "Error", `${index + 1} of ${total} clip(s) failed`);
+          resolve();
+        };
+
+        xhr.onload = () => {
+          const payload = xhr.response || {};
+          if (xhr.status < 200 || xhr.status >= 300 || payload.error) {
+            errors.push(`${file.name}: ${payload.error || `HTTP ${xhr.status}`}`);
+            stopProcessingPolling();
+            updateOverallProgress(processed, 0, total, "Error", `${index + 1} of ${total} clip(s) failed`);
+            resolve();
+            return;
+          }
+
+          batchId = payload.batch_id;
+          appendResultCard(payload.result);
+          processed += 1;
+          updateOverallProgress(
+            processed,
+            0,
+            total,
+            `Finished ${file.name}`,
+            `${processed} of ${total} clip(s) rendered`
+          );
+
+          downloadAllLink.href = payload.downloads.bundle;
+          downloadAllLink.setAttribute("aria-disabled", "false");
+          downloadAllLink.removeAttribute("title");
+          resultsSection.classList.remove("hidden");
+          stopProcessingPolling();
+          resolve();
+        };
+
+        xhr.setRequestHeader("Accept", "application/json");
+        xhr.send(formData);
+      });
+    }
+
+    if (processed === total) {
+      stopProcessingPolling();
+      targetProgress = 100;
+      updateProgressStatus(100, "Batch complete", `${processed} of ${total} clip(s) rendered`);
+      setTimeout(() => {
+        displayedProgress = 100;
+        renderProgress();
+        stopProgressAnimation();
+      }, 600);
+    } else if (!processed) {
+      resetProgress();
+    }
+
+    const messages = [];
+    if (processed) {
+      messages.push(`Rendered ${processed} clip(s).`);
+    }
+    if (warnings.length) {
+      messages.push(`Warnings: ${warnings.join(" • ")}`);
+    }
+    if (errors.length) {
+      messages.push(`Errors: ${errors.join(" • ")}`);
+    }
+    if (!processed && !errors.length) {
+      messages.push("Nothing was rendered.");
+    }
+
+    if (messages.length) {
+      const tone = errors.length ? "error" : processed ? "success" : "error";
+      showFlash(messages.join(" • "), tone);
+    } else {
+      clearFlash();
+    }
+
+    toggleForm(false);
   }
 
   async function uploadAsyncFile(file, jobId) {
@@ -1125,7 +1544,9 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
     });
     const data = await parseJsonResponse(res);
     if (!res.ok || data.error) {
-      throw new Error(data.error || `Job creation failed (HTTP ${res.status})`);
+      const error = new Error(data.error || `Job creation failed (HTTP ${res.status})`);
+      error.code = data.code || (res.status === 503 ? ASYNC_UNAVAILABLE_CODE : "API_ERROR");
+      throw error;
     }
     return data.job;
   }
@@ -1140,7 +1561,9 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
     });
     const data = await parseJsonResponse(res);
     if (!res.ok || data.error) {
-      throw new Error(data.error || `Failed to start job (HTTP ${res.status})`);
+      const error = new Error(data.error || `Failed to start job (HTTP ${res.status})`);
+      error.code = data.code || (res.status === 503 ? ASYNC_UNAVAILABLE_CODE : "API_ERROR");
+      throw error;
     }
     return data.job;
   }
@@ -1154,7 +1577,9 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       });
       const data = await parseJsonResponse(res);
       if (!res.ok || data.error) {
-        throw new Error(data.error || `Failed to check job status (HTTP ${res.status})`);
+        const error = new Error(data.error || `Failed to check job status (HTTP ${res.status})`);
+        error.code = data.code || (res.status === 503 ? ASYNC_UNAVAILABLE_CODE : "API_ERROR");
+        throw error;
       }
       const job = data.job;
       let progressValue = typeof job.progress === "number" ? Math.max(0, Math.min(1, job.progress)) : 0;
@@ -1189,7 +1614,9 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
         return job;
       }
       if (job.status === "failed") {
-        throw new Error(job.message || "Rendering failed.");
+        const error = new Error(job.message || "Rendering failed.");
+        error.code = job.code || "JOB_FAILED";
+        throw error;
       }
       await sleep(3000);
     }
@@ -1294,140 +1721,7 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       return;
     }
 
-        toggleForm(true);
-        updateOverridesInput();
-
-        const errors = [];
-        const total = files.length;
-        let processed = 0;
-        let batchId = (typeof crypto !== "undefined" && crypto.randomUUID)
-          ? crypto.randomUUID()
-          : `batch_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-
-        initializeProgress(total);
-
-        for (const [index, file] of files.entries()) {
-          const fileSize = file.size || 0;
-          updateOverallProgress(
-            processed,
-            0,
-            total,
-            `Preparing ${file.name}`,
-            `${index + 1} of ${total} clip(s) queued`
-          );
-
-          await new Promise((resolve) => {
-            const formData = new FormData();
-            formData.append("style", styleSelector());
-            formData.append("batch_id", batchId);
-            formData.append("video", file);
-            selectedRatios.forEach((ratio) => formData.append("ratios", ratio));
-            applyNamingToFormData(formData, file.name);
-
-            const xhr = new XMLHttpRequest();
-            xhr.open("POST", apiProcessUrl);
-            xhr.responseType = "json";
-
-            xhr.upload.onprogress = (event) => {
-              if (!event.lengthComputable) {
-                return;
-              }
-              const perFileRatio = fileSize ? Math.min(1, event.loaded / fileSize) : 0;
-              updateOverallProgress(
-                processed,
-                0,
-                total,
-                `Uploading ${file.name}`,
-                `${index + 1} of ${total} clip(s): ${(perFileRatio * 100).toFixed(0)}% uploaded`
-              );
-            };
-
-            xhr.upload.onload = () => {
-              updateOverallProgress(
-                processed,
-                0,
-                total,
-                `Processing ${file.name}`,
-                `${index + 1} of ${total} clip(s) uploaded`
-              );
-              startProcessingPolling(batchId, file.name, index, total, processed);
-            };
-
-            xhr.onerror = () => {
-              errors.push(`${file.name}: network error`);
-              stopProcessingPolling();
-              updateOverallProgress(processed, 0, total, "Error", `${index + 1} of ${total} clip(s) failed`);
-              resolve();
-            };
-
-            xhr.onload = () => {
-              const payload = xhr.response || {};
-              if (xhr.status < 200 || xhr.status >= 300 || payload.error) {
-                errors.push(`${file.name}: ${payload.error || `HTTP ${xhr.status}`}`);
-                stopProcessingPolling();
-                updateOverallProgress(processed, 0, total, "Error", `${index + 1} of ${total} clip(s) failed`);
-                resolve();
-                return;
-              }
-
-              batchId = payload.batch_id;
-              appendResultCard(payload.result);
-              processed += 1;
-              updateOverallProgress(
-                processed,
-                0,
-                total,
-                `Finished ${file.name}`,
-                `${processed} of ${total} clip(s) rendered`
-              );
-
-              downloadAllLink.href = payload.downloads.bundle;
-              downloadAllLink.setAttribute("aria-disabled", "false");
-              resultsSection.classList.remove("hidden");
-              stopProcessingPolling();
-              resolve();
-            };
-
-            xhr.setRequestHeader("Accept", "application/json");
-            xhr.send(formData);
-          });
-        }
-
-    if (processed === total) {
-      stopProcessingPolling();
-      targetProgress = 100;
-      updateProgressStatus(100, "Batch complete", `${processed} of ${total} clip(s) rendered`);
-      setTimeout(() => {
-        displayedProgress = 100;
-        renderProgress();
-        stopProgressAnimation();
-      }, 600);
-    } else if (!processed) {
-      resetProgress();
-    }
-
-    const messages = [];
-    if (processed) {
-      messages.push(`Rendered ${processed} clip(s).`);
-    }
-    if (warnings.length) {
-      messages.push(`Warnings: ${warnings.join(" • ")}`);
-    }
-    if (errors.length) {
-      messages.push(`Errors: ${errors.join(" • ")}`);
-    }
-    if (!processed && !errors.length) {
-      messages.push("Nothing was rendered.");
-    }
-
-    if (messages.length) {
-      const tone = errors.length ? "error" : processed ? "success" : "error";
-      showFlash(messages.join(" • "), tone);
-    } else {
-      clearFlash();
-    }
-
-    toggleForm(false);
+    await performFallbackRender(files, warnings, selectedRatios);
   });
 
   updateStyleCards();
