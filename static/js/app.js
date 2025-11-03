@@ -4,15 +4,38 @@
   const styleLabels = config.styles || {};
   const styleShortLabels = config.styleShort || {};
   const adConfig = config.ads || {};
-  const ASYNC_UNAVAILABLE_CODE = "ASYNC_UNAVAILABLE";
-  let asyncEnabled = config.asyncEnabled !== false;
   const { createFFmpeg, fetchFile } = window.FFmpeg || {};
   let ffmpegInstance = null;
   let ffmpegReady = false;
   let ffmpegLoadingPromise = null;
-  const CLIENT_RENDER_MODE = "client";
   let ffmpegProgressCallback = null;
   const FFMPEG_CORE_URL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js";
+  const CLIENT_DURATION_LIMIT_SECONDS = config.clientDurationLimit ?? 75;
+
+  // Backend routing configuration for dual deployment
+  const BACKEND_CONFIG = {
+    // Vercel backend (serverless, 10s timeout)
+    vercel: window.location.origin, // Same domain when deployed on Vercel
+    // Hostinger backend (VPS, no timeout limits)
+    hostinger: config.hostingerApiUrl || '',
+  };
+
+  // Smart backend selection based on video characteristics
+  function selectBackend(videoFile, duration) {
+    const fileSizeMB = videoFile.size / (1024 * 1024);
+    const isLargeFile = fileSizeMB > 50;
+    const isLongVideo = duration > CLIENT_DURATION_LIMIT_SECONDS;
+
+    // Use Hostinger for large files or when Hostinger URL is configured
+    if ((isLargeFile || isLongVideo) && BACKEND_CONFIG.hostinger) {
+      console.log(`[Backend] Using Hostinger for ${fileSizeMB.toFixed(1)}MB, ${duration.toFixed(1)}s video`);
+      return BACKEND_CONFIG.hostinger;
+    }
+
+    // Default to current origin (Vercel or local dev)
+    console.log(`[Backend] Using default backend (${window.location.origin})`);
+    return BACKEND_CONFIG.vercel;
+  }
 
   if (typeof window.launchRewardedAd !== "function") {
     window.launchRewardedAd = async (options = {}) => {
@@ -41,8 +64,7 @@
   const styleInputs = Array.from(form.querySelectorAll('input[name="style"]'));
   const styleOptions = Array.from(document.querySelectorAll('.style-option'));
   const selectionSummary = document.getElementById("selection-summary");
-  const asyncButton = document.getElementById("async-button");
-  const submitButton = document.getElementById("submit-button");
+  const renderButton = document.getElementById("render-button");
   const resetButton = document.getElementById("reset-button");
   const flashBox = document.getElementById("dynamic-flash");
   const progressSection = document.getElementById("progress-section");
@@ -321,7 +343,17 @@
     }
   }
 
-function startProcessingPolling(jobId, fileName, index, total, processedBaseline) {
+  function yieldToBrowser() {
+    return new Promise((resolve) => {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => resolve());
+      } else {
+        setTimeout(resolve, 16);
+      }
+    });
+  }
+
+  function startProcessingPolling(jobId, fileName, index, total, processedBaseline) {
     stopProcessingPolling();
     currentJobId = jobId;
     progressPoll = setInterval(async () => {
@@ -823,6 +855,47 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
     fileInput.files = dataTransfer.files;
   }
 
+  async function probeFileDuration(file) {
+    if (!file) {
+      return null;
+    }
+    if (!file.type || !file.type.startsWith("video/")) {
+      return null;
+    }
+    return new Promise((resolve, reject) => {
+      const video = document.createElement("video");
+      let revoked = false;
+      const objectUrl = URL.createObjectURL(file);
+
+      const cleanup = () => {
+        if (!revoked) {
+          URL.revokeObjectURL(objectUrl);
+          revoked = true;
+        }
+        video.removeAttribute("src");
+        video.load();
+      };
+
+      const handleLoaded = () => {
+        const duration = Number.isFinite(video.duration) ? video.duration : null;
+        cleanup();
+        resolve(duration && duration > 0 ? duration : null);
+      };
+
+      const handleError = () => {
+        cleanup();
+        reject(new Error("Failed to load video metadata"));
+      };
+
+      video.preload = "metadata";
+      video.muted = true;
+      video.playsInline = true;
+      video.addEventListener("loadedmetadata", handleLoaded, { once: true });
+      video.addEventListener("error", handleError, { once: true });
+      video.src = objectUrl;
+    });
+  }
+
   function processSelectedFiles(rawFiles, { announce = true } = {}) {
     const review = sanitizeFileList(rawFiles);
     updateFileInputFiles(review.files);
@@ -901,10 +974,9 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
   }
 
   function toggleForm(disabled) {
-    if (asyncButton) {
-      asyncButton.disabled = disabled;
+    if (renderButton) {
+      renderButton.disabled = disabled;
     }
-    submitButton.disabled = disabled;
     resetButton.disabled = disabled;
     fileInput.disabled = disabled;
     fileButton.disabled = disabled;
@@ -1096,27 +1168,17 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
     formData.append("base_override", overrideValue);
   }
 
-  if (asyncButton) {
-    asyncButton.addEventListener("click", async (event) => {
+  if (renderButton) {
+    renderButton.addEventListener("click", async (event) => {
       event.preventDefault();
       if (formDisabled) {
         return;
       }
-      await handleAsyncBatch();
+      await handleRenderClick();
     });
-
-    if (!asyncEnabled) {
-      asyncButton.title = "Server queue unavailable; using client-side renderer.";
-      asyncButton.setAttribute("data-mode", CLIENT_RENDER_MODE);
-      asyncButton.textContent = "Render batch (client)";
-    } else {
-      asyncButton.removeAttribute("data-mode");
-      asyncButton.textContent = "Render batch";
-      asyncButton.removeAttribute("title");
-    }
   }
 
-  async function handleAsyncBatch() {
+  async function handleRenderClick() {
     clearFlash();
     clearResults();
     resetProgress();
@@ -1136,6 +1198,27 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
 
     if (!selectedRatios.length) {
       showFlash("Choose at least one output aspect ratio.");
+      return;
+    }
+
+    let mustFallback = false;
+    for (const file of files) {
+      try {
+        const duration = await probeFileDuration(file);
+        if (duration && duration > CLIENT_DURATION_LIMIT_SECONDS) {
+          mustFallback = true;
+        }
+      } catch (error) {
+        console.warn("Failed to inspect duration for", file?.name, error);
+      }
+    }
+
+    if (mustFallback) {
+      showFlash(
+        `Clips longer than ${CLIENT_DURATION_LIMIT_SECONDS} seconds switch to the reliable server renderer.`,
+        "error"
+      );
+      await performFallbackRender(files, warnings, selectedRatios);
       return;
     }
 
@@ -1205,6 +1288,7 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
 
         try {
           for (const [ratioIndex, aspectKey] of selectedRatios.entries()) {
+            await yieldToBrowser();
             const aspectMeta = aspectOptions[aspectKey] || defaultAspect;
             const [targetW, targetH] = aspectMeta.size || [1080, 1080];
             const filters = buildFfmpegFilters(styleKey, targetW, targetH);
@@ -1279,6 +1363,8 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
               filename,
               ratio_label: ratioLabel,
             });
+
+            await yieldToBrowser();
           }
         } finally {
           try {
@@ -1449,179 +1535,6 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
     toggleForm(false);
   }
 
-  async function uploadAsyncFile(file, jobId) {
-    try {
-      const presign = await requestPresignedUpload(file, jobId);
-      await uploadToPresignedUrl(file, presign.upload);
-      return {
-        job_id: presign.job_id || jobId,
-        record: buildFileRecord(file, presign.file.key),
-      };
-    } catch (error) {
-      if (error && error.code === "S3_DISABLED") {
-        const local = await uploadLocalFile(file, jobId);
-        return {
-          job_id: local.job_id,
-          record: buildFileRecord(file, local.file.key),
-        };
-      }
-      throw error;
-    }
-  }
-
-  function buildFileRecord(file, key) {
-    const baseOverride = namingOptions.mode === "custom" ? (baseOverrides[file.name] || "") : "";
-    return {
-      key,
-      original_name: file.name,
-      size: file.size || 0,
-      content_type: file.type || "video/mp4",
-      base_override: baseOverride || null,
-    };
-  }
-
-  async function requestPresignedUpload(file, jobId) {
-    const res = await fetch("/api/upload-url", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        job_id: jobId,
-        filename: file.name,
-        size: file.size || 0,
-        content_type: file.type || "video/mp4",
-      }),
-    });
-    if (res.status === 503) {
-      const error = new Error("Object storage not configured.");
-      error.code = "S3_DISABLED";
-      throw error;
-    }
-    const data = await parseJsonResponse(res);
-    if (!res.ok || data.error) {
-      throw new Error(data.error || `Upload slot failed (HTTP ${res.status})`);
-    }
-    return data;
-  }
-
-  async function uploadToPresignedUrl(file, presign) {
-    if (!presign || !presign.url) {
-      throw new Error("Invalid presigned payload.");
-    }
-    const formData = new FormData();
-    Object.entries(presign.fields || {}).forEach(([key, value]) => {
-      formData.append(key, value);
-    });
-    formData.append("file", file);
-    const response = await fetch(presign.url, {
-      method: "POST",
-      body: formData,
-    });
-    if (!response.ok) {
-      throw new Error(`Upload failed for ${file.name} (HTTP ${response.status})`);
-    }
-  }
-
-  async function uploadLocalFile(file, jobId) {
-    const formData = new FormData();
-    formData.append("video", file);
-    formData.append("job_id", jobId);
-    const res = await fetch("/api/local-upload", {
-      method: "POST",
-      body: formData,
-    });
-    const data = await parseJsonResponse(res);
-    if (!res.ok || data.error) {
-      throw new Error(data.error || `Local upload failed (HTTP ${res.status})`);
-    }
-    return data;
-  }
-
-  async function createAsyncJob(payload) {
-    const res = await fetch("/api/jobs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await parseJsonResponse(res);
-    if (!res.ok || data.error) {
-      const error = new Error(data.error || `Job creation failed (HTTP ${res.status})`);
-      error.code = data.code || (res.status === 503 ? ASYNC_UNAVAILABLE_CODE : "API_ERROR");
-      throw error;
-    }
-    return data.job;
-  }
-
-  async function startAsyncJob(jobId, rewardToken) {
-    const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        reward_token: rewardToken || "",
-      }),
-    });
-    const data = await parseJsonResponse(res);
-    if (!res.ok || data.error) {
-      const error = new Error(data.error || `Failed to start job (HTTP ${res.status})`);
-      error.code = data.code || (res.status === 503 ? ASYNC_UNAVAILABLE_CODE : "API_ERROR");
-      throw error;
-    }
-    return data.job;
-  }
-
-  let asyncStartTimestamp = null;
-
-  async function pollAsyncJob(jobId, totalFiles) {
-    while (true) {
-      const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/status`, {
-        cache: "no-store",
-      });
-      const data = await parseJsonResponse(res);
-      if (!res.ok || data.error) {
-        const error = new Error(data.error || `Failed to check job status (HTTP ${res.status})`);
-        error.code = data.code || (res.status === 503 ? ASYNC_UNAVAILABLE_CODE : "API_ERROR");
-        throw error;
-      }
-      const job = data.job;
-      let progressValue = typeof job.progress === "number" ? Math.max(0, Math.min(1, job.progress)) : 0;
-      try {
-        const progressRes = await fetch(`/progress/${encodeURIComponent(jobId)}`, { cache: "no-store" });
-        if (progressRes.ok) {
-          const progressPayload = await progressRes.json();
-          if (typeof progressPayload.progress === "number") {
-            progressValue = Math.max(progressValue, Math.max(0, Math.min(1, progressPayload.progress)));
-          }
-        }
-      } catch (error) {
-        // ignore fetch errors
-      }
-
-      const percent = Math.round(progressValue * 100);
-      const statusText = job.status === "done" ? "Finalising…" : job.status === "failed" ? "Failed" : "Rendering…";
-      let subtitle = `${percent}% complete`;
-      if (progressValue > 0 && progressValue < 1 && asyncStartTimestamp) {
-        const elapsed = (Date.now() - asyncStartTimestamp) / 1000;
-        const etaSeconds = elapsed * (1 / progressValue - 1);
-        subtitle += ` • ~${formatEta(Math.max(0, etaSeconds))}`;
-      }
-      updateProgressStatus(
-        Math.max(targetProgress, percent || 0),
-        statusText,
-        subtitle
-      );
-
-      if (job.status === "done") {
-        updateProgressStatus(100, "Batch complete", `${totalFiles} clip(s) rendered`);
-        return job;
-      }
-      if (job.status === "failed") {
-        const error = new Error(job.message || "Rendering failed.");
-        error.code = job.code || "JOB_FAILED";
-        throw error;
-      }
-      await sleep(3000);
-    }
-  }
-
   function buildNamingPayload() {
     const pattern = getPatternString();
     const dateStamp = new Date().toISOString().slice(0, 10);
@@ -1637,64 +1550,6 @@ function startProcessingPolling(jobId, fileName, index, total, processedBaseline
       label_mode: namingOptions.labelMode,
       date_stamp: dateStamp,
     };
-  }
-
-  async function parseJsonResponse(res) {
-    const contentType = res.headers.get("content-type") || "";
-    if (contentType.includes("application/json")) {
-      return res.json();
-    }
-    const text = await res.text();
-    const error = new Error(text || `Unexpected response (HTTP ${res.status})`);
-    error.code = "NON_JSON";
-    throw error;
-  }
-
-  function formatEta(seconds) {
-    if (!Number.isFinite(seconds) || seconds <= 0) {
-      return "0s";
-    }
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.round(seconds % 60);
-    if (mins <= 0) {
-      return `${secs}s`;
-    }
-    if (mins >= 60) {
-      const hours = Math.floor(mins / 60);
-      const remMins = mins % 60;
-      if (remMins <= 0) {
-        return `${hours}h`;
-      }
-      return `${hours}h ${remMins}m`;
-    }
-    return `${mins}m ${secs.toString().padStart(2, "0")}s`;
-  }
-
-  function renderAsyncResults(job) {
-    clearResults();
-    const styleKey = job.style || styleSelector();
-    (job.results || []).forEach((entry) => {
-      const normalized = {
-        original_name: entry.original_name,
-        style_label: styleLabels[styleKey] || styleKey,
-        ratio_labels: Array.from(new Set((entry.outputs || []).map((out) => out.ratio_label).filter(Boolean))),
-        outputs: (entry.outputs || []).map((out) => ({
-          url: out.url,
-          label: out.label || out.filename,
-          filename: out.filename,
-        })),
-      };
-      appendResultCard(normalized);
-    });
-
-    if (job.results && job.results.length) {
-      resultsSection.classList.remove("hidden");
-      downloadAllLink.href = `/download/${encodeURIComponent(job.id)}/bundle`;
-      downloadAllLink.setAttribute("aria-disabled", "false");
-    } else {
-      downloadAllLink.href = "#";
-      downloadAllLink.setAttribute("aria-disabled", "true");
-    }
   }
 
   form.addEventListener("submit", async (event) => {

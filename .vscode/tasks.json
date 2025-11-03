@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SSH Tunnel",
+      "type": "shell",
+      "command": "ssh -L 5678:localhost:5678 -N ${input:sshHost}",
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": {
+          "regexp": "^$",
+          "file": 0,
+          "location": 1,
+          "message": 2
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "^.*$",
+          "endsPattern": "^$"
+        }
+      },
+      "presentation": {
+        "reveal": "silent",
+        "panel": "new"
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "sshHost",
+      "type": "promptString",
+      "description": "SSH connection string (e.g., user@hostname)",
+      "default": "root@your-hostinger-ip"
+    }
+  ]
+}

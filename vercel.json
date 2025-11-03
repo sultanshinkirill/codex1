@@ -1,0 +1,53 @@
+{
+  "version": 2,
+  "name": "free-autoframe",
+  "builds": [
+    {
+      "src": "app.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "15mb"
+      }
+    },
+    {
+      "src": "static/**",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/static/(.*)",
+      "dest": "/static/$1"
+    },
+    {
+      "src": "/favicon.ico",
+      "dest": "/static/favicon.ico"
+    },
+    {
+      "src": "/(.*\\.(css|js|png|jpg|jpeg|gif|svg|ico|woff|woff2|ttf|eot))",
+      "dest": "/static/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/app.py"
+    }
+  ],
+  "env": {
+    "DEPLOYMENT_MODE": "vercel",
+    "FLASK_ENV": "production",
+    "CLIENT_DURATION_LIMIT_SECONDS": "75",
+    "MAX_CONTENT_LENGTH_MB": "50"
+  },
+  "functions": {
+    "app.py": {
+      "maxDuration": 10,
+      "memory": 1024
+    }
+  },
+  "regions": ["iad1"],
+  "github": {
+    "enabled": true,
+    "autoAlias": true,
+    "silent": false
+  }
+}

@@ -1,0 +1,86 @@
+name: Deploy to Hostinger VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy to Hostinger
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.HOSTINGER_HOST }}
+          username: ${{ secrets.HOSTINGER_USER }}
+          key: ${{ secrets.HOSTINGER_SSH_KEY }}
+          port: ${{ secrets.HOSTINGER_PORT || 22 }}
+          script: |
+            # Navigate to app directory
+            cd ${{ secrets.HOSTINGER_APP_PATH || '/var/www/autoframe' }}
+
+            # Backup current version
+            echo "Creating backup..."
+            mkdir -p backups
+            BACKUP_NAME="backup-$(date +%Y%m%d-%H%M%S)"
+            cp -r . "backups/$BACKUP_NAME" || true
+
+            # Pull latest code
+            echo "Pulling latest code from GitHub..."
+            git fetch origin
+            git reset --hard origin/main
+
+            # Activate virtual environment
+            echo "Activating virtual environment..."
+            source venv/bin/activate
+
+            # Install/update dependencies
+            echo "Installing dependencies..."
+            pip install -r requirements.txt --upgrade
+
+            # Set proper permissions
+            echo "Setting permissions..."
+            chown -R www-data:www-data uploads outputs || true
+            chmod -R 755 uploads outputs || true
+
+            # Restart Flask service
+            echo "Restarting Flask service..."
+            sudo systemctl restart autoframe
+
+            # Wait for service to start
+            sleep 3
+
+            # Health check
+            echo "Performing health check..."
+            HEALTH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5000/health || echo "000")
+
+            if [ "$HEALTH_CHECK" = "200" ]; then
+              echo "✅ Deployment successful! Health check passed."
+              # Clean old backups (keep last 5)
+              cd backups && ls -t | tail -n +6 | xargs -r rm -rf
+            else
+              echo "❌ Health check failed with status: $HEALTH_CHECK"
+              echo "Rolling back to previous version..."
+              sudo systemctl stop autoframe
+              cd ..
+              rm -rf app.py static templates *.py
+              cp -r "backups/$BACKUP_NAME"/* .
+              sudo systemctl start autoframe
+              exit 1
+            fi
+
+            echo "Deployment completed at $(date)"
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "❌ Deployment to Hostinger failed. Check logs above."
+
+      - name: Notify on success
+        if: success()
+        run: echo "✅ Successfully deployed to Hostinger VPS!"
