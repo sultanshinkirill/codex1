@@ -10,9 +10,19 @@
 {% endblock %}
 
 {% block content %}
+  <!-- Tier Selection Banner -->
+  <div id="tier-banner" class="tier-banner">
+    <div class="tier-info">
+      <span id="tier-badge" class="tier-badge">FREE</span>
+      <span id="tier-limits"></span>
+      <span id="tier-usage" class="tier-usage"></span>
+    </div>
+    <button id="tier-toggle" type="button" class="tier-toggle-btn">Upgrade to PAID</button>
+  </div>
+
   <form id="batch-form" action="{{ url_for('process_upload') }}" method="post" enctype="multipart/form-data">
     <div class="field">
-      <label for="file-picker">Upload up to 10 clips</label>
+      <label for="file-picker"><span id="max-files-label">Upload up to 3 clips</span></label>
       <div class="file-input">
         <input
           type="file"
@@ -26,12 +36,12 @@
           <button id="file-button" class="secondary-button" type="button">Choose videos</button>
           <span id="selection-summary" class="muted" style="font-size: 0.85rem;">No files selected yet.</span>
         </div>
-        <small>Pick individual files. Only the first 10 compatible videos are processed.</small>
+        <small id="file-limit-note">Pick individual files. Only the first 3 compatible videos are processed.</small>
       </div>
     </div>
 
     <div class="field">
-      <label>Output aspect ratios (choose up to three)</label>
+      <label><span id="ratio-label">Output aspect ratios (choose up to 2)</span></label>
       <div class="aspect-options">
         {% for key, config in aspects.items() %}
           <label class="aspect-card">

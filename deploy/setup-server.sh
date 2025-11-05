@@ -135,7 +135,7 @@ backlog = 2048
 workers = multiprocessing.cpu_count() * 2 + 1
 worker_class = 'sync'
 worker_connections = 1000
-timeout = 300  # 5 minutes for long video processing
+timeout = 600  # 10 minutes for large video processing (PAID tier: 20 videos × 300MB)
 keepalive = 2
 
 # Logging
@@ -189,15 +189,20 @@ server {
     # Redirect HTTP to HTTPS (will be added after SSL setup)
     # return 301 https://$server_name$request_uri;
 
-    # Client body size (for large video uploads)
-    client_max_body_size 200M;
-    client_body_timeout 300s;
+    # Client body size (for large video uploads - PAID tier supports up to 300MB)
+    client_max_body_size 400M;
+    client_body_timeout 600s;
 
-    # Timeouts
-    proxy_connect_timeout 300s;
-    proxy_send_timeout 300s;
-    proxy_read_timeout 300s;
-    send_timeout 300s;
+    # Timeouts (increased for large video processing)
+    proxy_connect_timeout 600s;
+    proxy_send_timeout 600s;
+    proxy_read_timeout 600s;
+    send_timeout 600s;
+
+    # CRITICAL: COOP/COEP headers for ffmpeg.wasm SharedArrayBuffer support
+    # Without these headers, browser rendering will be 10x slower or fail
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Embedder-Policy "require-corp" always;
 
     # Logging
     access_log /var/log/nginx/autoframe_access.log;

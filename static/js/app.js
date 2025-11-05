@@ -4,13 +4,137 @@
   const styleLabels = config.styles || {};
   const styleShortLabels = config.styleShort || {};
   const adConfig = config.ads || {};
-  const { createFFmpeg, fetchFile } = window.FFmpeg || {};
+  const { createFFmpeg, fetchFile} = window.FFmpeg || {};
   let ffmpegInstance = null;
   let ffmpegReady = false;
   let ffmpegLoadingPromise = null;
   let ffmpegProgressCallback = null;
   const FFMPEG_CORE_URL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js";
   const CLIENT_DURATION_LIMIT_SECONDS = config.clientDurationLimit ?? 75;
+
+  // Tier management
+  const TIER_LIMITS = {
+    free: {
+      maxFiles: 3,
+      maxFileSizeMB: 50,
+      maxDurationSeconds: 75,
+      maxRatios: 2,
+      mode: 'browser',
+      dailyLimit: 3,
+      label: 'FREE',
+      description: 'Up to 3 videos (50MB max), 75s, 2 ratios - Browser processing'
+    },
+    paid: {
+      maxFiles: 20,
+      maxFileSizeMB: 300,
+      maxDurationSeconds: 180,
+      maxRatios: 4,
+      mode: 'server',
+      dailyLimit: null,
+      label: 'PAID',
+      description: 'Up to 20 videos (300MB max), 3 min, 4 ratios - Server processing'
+    }
+  };
+
+  // Get current tier from URL parameter or default to free
+  const urlParams = new URLSearchParams(window.location.search);
+  let currentTier = urlParams.get('tier') || 'free';
+  let currentLimits = TIER_LIMITS[currentTier];
+
+  // Initialize tier UI
+  function initializeTierUI() {
+    const tierBadge = document.getElementById('tier-badge');
+    const tierLimits = document.getElementById('tier-limits');
+    const tierToggle = document.getElementById('tier-toggle');
+    const tierUsage = document.getElementById('tier-usage');
+
+    if (tierBadge) {
+      tierBadge.textContent = currentLimits.label;
+      if (currentTier === 'paid') {
+        tierBadge.classList.add('paid');
+      }
+    }
+
+    if (tierLimits) {
+      tierLimits.textContent = currentLimits.description;
+    }
+
+    if (tierToggle) {
+      if (currentTier === 'free') {
+        tierToggle.textContent = 'Upgrade to PAID';
+        tierToggle.classList.remove('downgrade');
+      } else {
+        tierToggle.textContent = 'Switch to FREE';
+        tierToggle.classList.add('downgrade');
+      }
+
+      tierToggle.addEventListener('click', async () => {
+        const newTier = currentTier === 'free' ? 'paid' : 'free';
+
+        try {
+          const response = await fetch('/upgrade', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tier: newTier })
+          });
+
+          if (response.ok) {
+            // Update URL and reload
+            const newUrl = new URL(window.location);
+            newUrl.searchParams.set('tier', newTier);
+            window.location.href = newUrl.toString();
+          }
+        } catch (error) {
+          console.error('Failed to switch tier:', error);
+          showFlash(`Failed to switch tier: ${error.message}`, 'error');
+        }
+      });
+    }
+
+    // Update UI elements with tier-specific limits
+    updateTierUIElements();
+
+    // Fetch and display usage
+    fetchUsageStats();
+  }
+
+  function updateTierUIElements() {
+    const maxFilesLabel = document.getElementById('max-files-label');
+    const fileLimitNote = document.getElementById('file-limit-note');
+    const ratioLabel = document.getElementById('ratio-label');
+
+    if (maxFilesLabel) {
+      maxFilesLabel.textContent = `Upload up to ${currentLimits.maxFiles} clips`;
+    }
+
+    if (fileLimitNote) {
+      fileLimitNote.textContent = `Pick individual files. Only the first ${currentLimits.maxFiles} compatible videos are processed.`;
+    }
+
+    if (ratioLabel) {
+      ratioLabel.textContent = `Output aspect ratios (choose up to ${currentLimits.maxRatios})`;
+    }
+  }
+
+  async function fetchUsageStats() {
+    try {
+      const response = await fetch('/usage');
+      if (response.ok) {
+        const data = await response.json();
+        const tierUsage = document.getElementById('tier-usage');
+
+        if (tierUsage && data.renders_today !== undefined) {
+          if (currentTier === 'free' && currentLimits.dailyLimit) {
+            tierUsage.textContent = `${data.renders_today}/${currentLimits.dailyLimit} batches today`;
+          } else {
+            tierUsage.textContent = `${data.renders_today} batches today`;
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch usage:', error);
+    }
+  }
 
   // Backend routing configuration for dual deployment
   const BACKEND_CONFIG = {
@@ -95,8 +219,7 @@
 
   const allowedExtensions = ["mp4", "mov", "m4v", "mkv"];
   const videoExtensions = allowedExtensions.map((ext) => `.${ext}`);
-  const maxFiles = 10;
-  const maxRatios = 3;
+  // Tier-based limits (use currentLimits.maxFiles and currentLimits.maxRatios)
   const NAMING_STORAGE_KEY = "vibeNamingOptions_v2";
   const defaultAspect = { short: "1x1", label: "1:1 Square", size: [1080, 1080] };
 
@@ -825,11 +948,19 @@
   function sanitizeFileList(files) {
     const picked = [];
     const skipped = [];
+    const tooLarge = [];
+    const maxSizeBytes = currentLimits.maxFileSizeMB * 1024 * 1024;
+
     for (const file of files) {
       if (!file || !file.name) continue;
       const ext = file.name.split(".").pop().toLowerCase();
       if (!allowedExtensions.includes(ext)) {
         skipped.push(file.name);
+        continue;
+      }
+      // Check file size against tier limit
+      if (file.size > maxSizeBytes) {
+        tooLarge.push(`${file.name} (${(file.size / 1024 / 1024).toFixed(1)}MB)`);
         continue;
       }
       picked.push(file);
@@ -838,10 +969,13 @@
     if (skipped.length) {
       notices.push(`Skipped unsupported files: ${skipped.join(", ")}`);
     }
-    if (picked.length > maxFiles) {
-      notices.push(`Max ${maxFiles} videos can be selected at once. You picked ${picked.length}.`);
+    if (tooLarge.length) {
+      notices.push(`Files too large (max ${currentLimits.maxFileSizeMB}MB): ${tooLarge.join(", ")}`);
     }
-    const usable = picked.slice(0, maxFiles);
+    if (picked.length > currentLimits.maxFiles) {
+      notices.push(`Max ${currentLimits.maxFiles} videos per batch. You picked ${picked.length}.`);
+    }
+    const usable = picked.slice(0, currentLimits.maxFiles);
     summarizeSelection(usable);
     rebuildBaseEditor(usable);
     updatePatternPreview();
@@ -911,17 +1045,17 @@
 
   function getSelectedRatiosSafe() {
     const selected = getSelectedRatios();
-    if (selected.length > maxRatios) {
-      return selected.slice(0, maxRatios);
+    if (selected.length > currentLimits.maxRatios) {
+      return selected.slice(0, currentLimits.maxRatios);
     }
     return selected;
   }
 
   function enforceRatioLimit(changedInput) {
     const selected = getSelectedRatios();
-    if (selected.length > maxRatios) {
+    if (selected.length > currentLimits.maxRatios) {
       changedInput.checked = false;
-      showFlash(`Pick up to ${maxRatios} aspect ratios per batch.`);
+      showFlash(`Pick up to ${currentLimits.maxRatios} aspect ratios per batch.`);
     }
     updatePatternPreview();
   }
@@ -1201,33 +1335,59 @@
       return;
     }
 
-    let mustFallback = false;
+    // Check usage limits before rendering
+    try {
+      const usageResponse = await fetch('/usage');
+      if (usageResponse.ok) {
+        const usageStats = await usageResponse.json();
+
+        // Check if FREE tier has reached daily limit
+        if (usageStats.tier === 'free' && usageStats.dailyLimit &&
+            usageStats.rendersToday >= usageStats.dailyLimit) {
+          showFlash(`FREE tier daily limit reached (${usageStats.rendersToday}/${usageStats.dailyLimit}). Upgrade to PAID for unlimited rendering.`, 'error');
+          return;
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to check usage stats:', error);
+    }
+
+    // Check video durations against tier limit
+    let tooLong = false;
+    const maxDuration = currentLimits.maxDurationSeconds;
     for (const file of files) {
       try {
         const duration = await probeFileDuration(file);
-        if (duration && duration > CLIENT_DURATION_LIMIT_SECONDS) {
-          mustFallback = true;
+        if (duration && duration > maxDuration) {
+          showFlash(
+            `${file.name} is ${Math.ceil(duration)}s (max ${maxDuration}s for ${currentLimits.label} tier). ${currentTier === 'free' ? 'Upgrade to PAID for longer videos.' : 'Please use shorter videos.'}`,
+            "error"
+          );
+          tooLong = true;
+          break;
         }
       } catch (error) {
         console.warn("Failed to inspect duration for", file?.name, error);
       }
     }
 
-    if (mustFallback) {
-      showFlash(
-        `Clips longer than ${CLIENT_DURATION_LIMIT_SECONDS} seconds switch to the reliable server renderer.`,
-        "error"
-      );
+    if (tooLong) {
+      return;
+    }
+
+    // Enforce rendering mode based on tier
+    if (currentLimits.mode === 'server') {
+      // PAID tier: always use server rendering
       await performFallbackRender(files, warnings, selectedRatios);
       return;
     }
 
+    // FREE tier: use browser rendering only
     try {
       await performClientSideRender(files, warnings, selectedRatios);
     } catch (error) {
       console.error(error);
-      showFlash("Client-side rendering failed. Falling back to server renderer.", "error");
-      await performFallbackRender(files, warnings, selectedRatios);
+      showFlash("Client-side rendering failed. Please try again or contact support.", "error");
     }
   }
 
@@ -1385,6 +1545,15 @@
       resultsSection.classList.remove("hidden");
       finalResults.forEach((entry) => appendResultCard(entry));
 
+      // Increment usage counter after successful client-side rendering
+      try {
+        await fetch('/increment-usage', { method: 'POST' });
+        // Refresh usage stats
+        fetchUsageStats();
+      } catch (error) {
+        console.warn('Failed to increment usage counter:', error);
+      }
+
       const totalOutputs = finalResults.reduce((sum, entry) => sum + entry.outputs.length, 0);
       const messages = [`Rendered ${totalOutputs} clip(s).`];
       if (warnings.length) {
@@ -1507,6 +1676,9 @@
         renderProgress();
         stopProgressAnimation();
       }, 600);
+
+      // Refresh usage stats after successful server-side rendering
+      fetchUsageStats();
     } else if (!processed) {
       resetProgress();
     }
@@ -1584,4 +1756,7 @@
   rebuildBaseEditor([]);
   updatePatternPreview();
   updateOverridesInput();
+
+  // Initialize tier UI
+  initializeTierUI();
 })();

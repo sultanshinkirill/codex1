@@ -12,9 +12,12 @@ import os
 import re
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from threading import Semaphore, Thread
+import time
+import shutil
 
 import numpy as np
 from flask import (
@@ -28,8 +31,11 @@ from flask import (
     send_file,
     send_from_directory,
     url_for,
+    session,
 )
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from PIL import Image, ImageFilter
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
@@ -203,6 +209,48 @@ CORS(app, resources={
     }
 })
 
+# Rate limiting with composite key (session + IP) to prevent bypasses
+def get_rate_limit_key():
+    """
+    Composite rate limit key using both session token and IP
+    Prevents bypass via cookie clearing or incognito mode
+    """
+    from auth import get_client_ip
+    # Import here to avoid circular dependency
+    token = session.get('token', 'anonymous')
+    ip = get_client_ip()
+    return f"{token}:{ip}"
+
+limiter = Limiter(
+    app=app,
+    key_func=get_rate_limit_key,
+    default_limits=["200 per hour"],  # Global default
+    storage_uri="memory://",  # Use memory storage for MVP (Redis in production)
+    headers_enabled=True,
+)
+
+# Session management - CRITICAL: Must set SECRET_KEY
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    # For development only - in production this MUST be set via environment
+    if DEPLOYMENT_MODE == 'development':
+        SECRET_KEY = "dev-secret-change-in-production-" + secrets.token_hex(16)
+        print("⚠️  WARNING: Using auto-generated SECRET_KEY. Set SECRET_KEY env var in production!")
+    else:
+        raise RuntimeError("SECRET_KEY environment variable must be set in production!")
+
+app.secret_key = SECRET_KEY
+
+# Import auth functions
+from auth import init_session, reset_daily_counter, check_tier_usage, increment_usage, get_tier, set_tier, get_usage_stats
+
+# Initialize session before each request
+@app.before_request
+def before_request():
+    """Initialize session and reset daily counters"""
+    init_session()
+    reset_daily_counter()
+
 app.config.setdefault("MAX_UPLOAD_FILES", MAX_FILES_PER_BATCH)
 app.config.setdefault("MAX_UPLOAD_SIZE_BYTES", MAX_UPLOAD_SIZE_BYTES)
 
@@ -213,7 +261,112 @@ for directory in (UPLOAD_DIR, OUTPUT_DIR):
 
 app.config["UPLOAD_FOLDER"] = UPLOAD_DIR
 app.config["OUTPUT_FOLDER"] = OUTPUT_DIR
-app.secret_key = os.environ.get("SECRET_KEY", os.environ.get("VIBE_RESIZER_SECRET", "dev-secret-change-me"))
+
+# Concurrency control for video processing (MVP: max 2 concurrent jobs)
+MAX_CONCURRENT_JOBS = 2
+processing_semaphore = Semaphore(MAX_CONCURRENT_JOBS)
+
+# Cleanup worker configuration
+CLEANUP_INTERVAL_HOURS = 1  # Run cleanup every hour
+CLEANUP_MAX_AGE_HOURS = int(os.environ.get("AUTO_CLEANUP_HOURS", 1))  # Delete files older than 1 hour
+_cleanup_thread = None
+_cleanup_shutdown = False
+
+
+def cleanup_old_files():
+    """
+    Background worker that cleans up old files from uploads and outputs directories
+    Runs periodically to prevent disk space issues
+    """
+    global _cleanup_shutdown
+
+    logger = logging.getLogger(__name__)
+    logger.info(f"Cleanup worker started (interval: {CLEANUP_INTERVAL_HOURS}h, max_age: {CLEANUP_MAX_AGE_HOURS}h)")
+
+    while not _cleanup_shutdown:
+        try:
+            time.sleep(CLEANUP_INTERVAL_HOURS * 3600)  # Sleep for configured interval
+
+            if _cleanup_shutdown:
+                break
+
+            cutoff_time = datetime.now() - timedelta(hours=CLEANUP_MAX_AGE_HOURS)
+            deleted_files = 0
+            freed_bytes = 0
+
+            # Clean uploads directory
+            for file_path in UPLOAD_DIR.glob("*"):
+                if file_path.is_file():
+                    try:
+                        mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+                        if mtime < cutoff_time:
+                            file_size = file_path.stat().st_size
+                            file_path.unlink()
+                            deleted_files += 1
+                            freed_bytes += file_size
+                    except Exception as e:
+                        logger.warning(f"Failed to delete upload file {file_path}: {e}")
+
+            # Clean outputs directory (entire job directories)
+            for job_dir in OUTPUT_DIR.glob("*"):
+                if job_dir.is_dir():
+                    try:
+                        mtime = datetime.fromtimestamp(job_dir.stat().st_mtime)
+                        if mtime < cutoff_time:
+                            dir_size = sum(f.stat().st_size for f in job_dir.glob("**/*") if f.is_file())
+                            shutil.rmtree(job_dir)
+                            deleted_files += 1
+                            freed_bytes += dir_size
+                    except Exception as e:
+                        logger.warning(f"Failed to delete output directory {job_dir}: {e}")
+
+            if deleted_files > 0:
+                freed_mb = freed_bytes / (1024 * 1024)
+                logger.info(f"Cleanup completed: {deleted_files} items deleted, {freed_mb:.1f} MB freed")
+
+            # Check disk space and warn if low
+            try:
+                disk_usage = shutil.disk_usage(OUTPUT_DIR)
+                free_percent = (disk_usage.free / disk_usage.total) * 100
+                if free_percent < 10:
+                    logger.warning(f"Low disk space: {free_percent:.1f}% free ({disk_usage.free / (1024**3):.1f} GB)")
+            except Exception as e:
+                logger.warning(f"Failed to check disk space: {e}")
+
+        except Exception as e:
+            logger.error(f"Cleanup worker error: {e}")
+
+    logger.info("Cleanup worker stopped")
+
+
+def start_cleanup_worker():
+    """Start the cleanup background thread"""
+    global _cleanup_thread, _cleanup_shutdown
+
+    if _cleanup_thread is not None:
+        return
+
+    _cleanup_shutdown = False
+    _cleanup_thread = Thread(target=cleanup_old_files, daemon=True, name="CleanupWorker")
+    _cleanup_thread.start()
+    logging.info("Cleanup worker thread started")
+
+
+def stop_cleanup_worker():
+    """Stop the cleanup background thread"""
+    global _cleanup_thread, _cleanup_shutdown
+
+    if _cleanup_thread is None:
+        return
+
+    _cleanup_shutdown = True
+    _cleanup_thread.join(timeout=5)
+    _cleanup_thread = None
+    logging.info("Cleanup worker thread stopped")
+
+
+# Start cleanup worker on app startup
+start_cleanup_worker()
 
 
 @app.context_processor
@@ -683,6 +836,33 @@ def health_check():
     }), 200
 
 
+@app.route('/upgrade', methods=['POST'])
+def upgrade_tier():
+    """Upgrade/downgrade user tier (MVP - no payment)"""
+    data = request.get_json()
+    new_tier = data.get('tier', 'free')
+
+    if set_tier(new_tier):
+        return jsonify({'tier': new_tier, 'message': f'Switched to {new_tier.upper()} tier'}), 200
+    else:
+        return jsonify({'error': 'Invalid tier'}), 400
+
+
+@app.route('/usage')
+def get_usage():
+    """Get current user's usage statistics"""
+    stats = get_usage_stats()
+    return jsonify(stats), 200
+
+
+@app.route('/increment-usage', methods=['POST'])
+@limiter.limit("20 per hour")  # Allow multiple client-side renders per hour
+def increment_usage_endpoint():
+    """Increment usage counter (called after client-side rendering)"""
+    increment_usage()
+    return jsonify({'status': 'ok'}), 200
+
+
 @app.route("/progress/<job_id>")
 def get_progress(job_id):
     """Get progress for server-side processing jobs"""
@@ -781,19 +961,43 @@ def process_upload():
 
 
 @app.post("/api/process")
+@limiter.limit("10 per hour")  # Strict limit for server processing
 def api_process():
+    # CRITICAL: Block FREE tier from using server rendering
+    user_tier = get_tier()
+    if user_tier == 'free':
+        return {"error": "FREE tier must use browser rendering. Upgrade to PAID for server processing."}, 403
+
+    # Check Content-Length before reading request body (prevent bandwidth waste)
+    content_length = request.content_length
+    max_size = 400 * 1024 * 1024  # 400 MB (buffer above 300MB tier limit)
+    if content_length and content_length > max_size:
+        return {"error": f"File too large. Maximum upload size is 300MB."}, 413
+
+    # Check usage limits before processing
+    can_process, error_msg = check_tier_usage()
+    if not can_process:
+        return {"error": error_msg}, 429
+
+    # Check if server is at capacity
+    if not processing_semaphore.acquire(blocking=False):
+        return {"error": f"Server at capacity ({MAX_CONCURRENT_JOBS} jobs processing). Please wait and try again."}, 503
+
     style = request.form.get("style", "blur")
     file_storage = request.files.get("video")
 
     if not file_storage or file_storage.filename == "":
+        processing_semaphore.release()
         return {"error": "Select a video to upload."}, 400
 
     if not allowed_file(file_storage.filename):
+        processing_semaphore.release()
         return {"error": "Supported formats: mp4, mov, m4v, mkv."}, 400
 
     ratios = request.form.getlist("ratios") or request.form.getlist("ratio")
     ratios = [r for r in ratios if r in ASPECT_OPTIONS]
     if not ratios:
+        processing_semaphore.release()
         return {"error": "Select at least one aspect ratio (max two)."}, 400
     if len(ratios) > 3:
         ratios = ratios[:3]
@@ -813,10 +1017,18 @@ def api_process():
             base_override,
         )
     except ClipTooLongError:
+        processing_semaphore.release()
         return {"error": "Max video length for MVP is 3 minutes (180 seconds)."}, 400
     except Exception as exc:  # pragma: no cover
         logging.exception("Video rendering failed")
+        processing_semaphore.release()
         return {"error": str(exc)}, 500
+    finally:
+        # Always release semaphore
+        processing_semaphore.release()
+
+    # Increment usage counter after successful processing
+    increment_usage()
 
     return {
         "status": "ok",

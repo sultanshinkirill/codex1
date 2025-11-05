@@ -1,5 +1,6 @@
 Flask==3.0.3
 Flask-CORS==4.0.0
+Flask-Limiter==3.5.0
 gunicorn==21.2.0
 moviepy==1.0.3
 Pillow==10.2.0

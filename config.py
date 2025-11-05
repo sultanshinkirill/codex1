@@ -84,15 +84,35 @@ class HostingerConfig(Config):
     DEBUG = False
     DEPLOYMENT_MODE = 'hostinger'
 
-    # Full processing capabilities
-    MAX_CONTENT_LENGTH = 200 * 1024 * 1024  # 200MB max per file
-    MAX_SERVER_DURATION_SECONDS = 300  # 5 minutes max per video
-    MAX_BATCH_SIZE = 10  # Up to 10 videos
+    # Full processing capabilities (updated for PAID tier)
+    MAX_CONTENT_LENGTH = 400 * 1024 * 1024  # 400MB max (buffer for PAID tier 300MB limit)
+    MAX_SERVER_DURATION_SECONDS = 600  # 10 minutes max per video (PAID tier: 20 videos × 300MB)
+    MAX_BATCH_SIZE = 20  # PAID tier: up to 20 videos
+
+    # Tier limits (FREE vs PAID)
+    TIER_LIMITS = {
+        'free': {
+            'max_files': 3,
+            'max_file_size_mb': 50,
+            'max_duration_seconds': 75,
+            'max_ratios': 2,
+            'daily_limit': 3,
+            'mode': 'browser'
+        },
+        'paid': {
+            'max_files': 20,
+            'max_file_size_mb': 300,
+            'max_duration_seconds': 180,
+            'max_ratios': 4,
+            'daily_limit': None,
+            'mode': 'server'
+        }
+    }
 
     # Parallel processing based on CPU cores
     # For VPS 4 (4 vCPU): 2 parallel jobs is safe
     # For VPS 8 (8 vCPU): 4 parallel jobs
-    MAX_PARALLEL_JOBS = int(os.getenv('MAX_PARALLEL_JOBS', os.cpu_count() // 2 or 2))
+    MAX_PARALLEL_JOBS = int(os.getenv('MAX_PARALLEL_JOBS', 2))
 
     # Backend API URL (self)
     BACKEND_API_URL = os.getenv('BACKEND_API_URL', 'https://api.yourdomain.com')
