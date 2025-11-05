@@ -253,6 +253,13 @@ if not SECRET_KEY:
 
 app.secret_key = SECRET_KEY
 
+# Configure session for HTTPS (production)
+if DEPLOYMENT_MODE in ['hostinger', 'vercel']:
+    app.config['SESSION_COOKIE_SECURE'] = True  # Only send cookie over HTTPS
+    app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevent JavaScript access
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
+    app.config['PERMANENT_SESSION_LIFETIME'] = 86400  # 24 hours
+
 # Import auth functions
 from auth import init_session, reset_daily_counter, check_tier_usage, increment_usage, get_tier, set_tier, get_usage_stats
 
