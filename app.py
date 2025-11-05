@@ -209,6 +209,18 @@ CORS(app, resources={
     }
 })
 
+# Add COOP/COEP headers for SharedArrayBuffer support (required for ffmpeg.wasm)
+@app.after_request
+def add_security_headers(response):
+    """
+    Add Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy headers
+    These are REQUIRED for SharedArrayBuffer to work in modern browsers
+    Without these, browser-based rendering (ffmpeg.wasm) will fail
+    """
+    response.headers['Cross-Origin-Opener-Policy'] = 'same-origin'
+    response.headers['Cross-Origin-Embedder-Policy'] = 'require-corp'
+    return response
+
 # Rate limiting with composite key (session + IP) to prevent bypasses
 def get_rate_limit_key():
     """

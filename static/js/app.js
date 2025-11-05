@@ -9,7 +9,7 @@
   let ffmpegReady = false;
   let ffmpegLoadingPromise = null;
   let ffmpegProgressCallback = null;
-  const FFMPEG_CORE_URL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js";
+  const FFMPEG_CORE_URL = "https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js";
   const CLIENT_DURATION_LIMIT_SECONDS = config.clientDurationLimit ?? 75;
 
   // Tier management
